@@ -12,7 +12,9 @@ Aplicativo desktop nativo para Windows, desenvolvido em Python com Tkinter e SQL
 - Backup e restauração do banco SQLite
 - Consulta de atualizações pelo GitHub
 - Interface adaptável a Full HD, 2K e 4K, respeitando a escala de DPI do Windows
-- Ícones próprios para cada área do aplicativo
+- Temas Light off-white e Dark grafite com azul neon
+- Componentes arredondados, espaçamento amplo e hierarquia tipográfica moderna
+- Ícones próprios em alta resolução com redução antialiasada
 
 ## Executar pelo código
 
