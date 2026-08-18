@@ -8,6 +8,7 @@ Aplicativo desktop nativo para Windows, desenvolvido em Python com Tkinter e SQL
 - Foto opcional, categoria, unidade, custo e estoque mínimo
 - Aba **Estoque atual** com saldo, situação e valor estimado
 - Entradas, saídas, ajustes e inventário com data editável
+- Campo de data mascarado em `dd/mm/aa` e calendário para seleção com o mouse
 - Histórico completo de movimentações
 - Backup e restauração do banco SQLite
 - Consulta de atualizações pelo GitHub
@@ -15,6 +16,7 @@ Aplicativo desktop nativo para Windows, desenvolvido em Python com Tkinter e SQL
 - Temas Light off-white e Dark grafite com azul neon
 - Componentes arredondados, espaçamento amplo e hierarquia tipográfica moderna
 - Ícones próprios em alta resolução com redução antialiasada
+- Navegação priorizando Estoque atual, Movimentações e Produtos
 
 ## Executar pelo código
 

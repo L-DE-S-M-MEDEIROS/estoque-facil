@@ -51,6 +51,12 @@ def _draw_icon(name: str, color: str, size: int = 256) -> Image.Image:
         draw.line((p(12), p(17), p(12), p(4)), **line); draw.line((p(7), p(9), p(12), p(4), p(17), p(9)), **line); draw.line((p(4), p(21), p(20), p(21)), **line)
     elif name == "refresh":
         draw.arc((p(3), p(3), p(21), p(21)), 35, 325, fill=color, width=width); draw.line((p(17), p(3), p(21), p(7), p(16), p(8)), **line)
+    elif name == "calendar":
+        draw.rounded_rectangle((p(3), p(5), p(21), p(21)), radius=p(2), outline=color, width=width)
+        draw.line((p(3), p(10), p(21), p(10)), **line)
+        draw.line((p(8), p(3), p(8), p(7)), **line); draw.line((p(16), p(3), p(16), p(7)), **line)
+        for x in (7, 12, 17):
+            for y in (14, 18): draw.ellipse((p(x-.7), p(y-.7), p(x+.7), p(y+.7)), fill=color)
     return image
 
 

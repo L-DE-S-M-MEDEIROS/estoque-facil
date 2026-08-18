@@ -17,9 +17,10 @@ import customtkinter as ctk
 from PIL import ImageTk
 
 from premium_icons import app_icon, icon
+from premium_widgets import MaskedDateEntry
 
 APP_NAME = "Estoque Fácil"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -226,7 +227,7 @@ class EstoqueApp(ctk.CTk):
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight(); w, h = round(sw*.9), round(sh*.88); self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}"); self.minsize(min(sw, round(1050*self.ui_scale)), min(sh, round(680*self.ui_scale)))
         self.iconphoto(True, ImageTk.PhotoImage(app_icon(256))); self.protocol("WM_DELETE_WINDOW", self.close)
         self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "settings", "plus", "search", "edit", "trash", "download", "upload", "refresh")}
-        self.nav_buttons = {}; self.pages = {}; self.build_shell(); self.show_page("products")
+        self.nav_buttons = {}; self.pages = {}; self.build_shell(); self.show_page("stock")
 
     def load_settings(self):
         try: return json.loads(self.settings_path.read_text(encoding="utf-8"))
@@ -242,7 +243,7 @@ class EstoqueApp(ctk.CTk):
         brand = ctk.CTkFrame(logo, fg_color="transparent"); brand.pack(side="left", padx=13)
         ctk.CTkLabel(brand, text="Estoque Fácil", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 16, "bold")).pack(anchor="w")
         ctk.CTkLabel(brand, text="CONTROLE INTELIGENTE", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 9)).pack(anchor="w", pady=(2,0))
-        for key, label in (("products","Produtos"),("stock","Estoque atual"),("movements","Movimentações"),("settings","Configurações")):
+        for key, label in (("stock","Estoque atual"),("movements","Movimentações"),("products","Produtos"),("settings","Configurações")):
             button = ctk.CTkButton(self.sidebar, text=label, image=self.icons[key], compound="left", anchor="w", height=48, corner_radius=10, fg_color="transparent", hover_color=COLORS["surface_hover"], text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 13, "bold"), command=lambda k=key:self.show_page(k))
             button.pack(fill="x", padx=16, pady=4); self.nav_buttons[key]=button
         ctk.CTkLabel(self.sidebar, text=f"●  Dados locais protegidos\n    Versão {APP_VERSION}", justify="left", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10)).pack(side="bottom", anchor="w", padx=26, pady=28)
@@ -313,12 +314,23 @@ class EstoqueApp(ctk.CTk):
 
     def movements_page(self):
         page=ctk.CTkFrame(self.content,fg_color="transparent");PageTitle(page,"Movimentações","Registre entradas, saídas, ajustes e contagens de inventário.").pack(fill="x",pady=(0,22));body=ctk.CTkFrame(page,fg_color="transparent");body.pack(fill="both",expand=True);body.grid_columnconfigure(1,weight=1);body.grid_rowconfigure(0,weight=1)
-        form=Card(body,width=350);form.grid(row=0,column=0,sticky="ns",padx=(0,16));form.grid_propagate(False);ctk.CTkLabel(form,text="Nova movimentação",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(anchor="w",padx=20,pady=(22,18));self.m_type=tk.StringVar(value="entrada");self.m_product=tk.StringVar();self.m_quantity=tk.StringVar();self.m_date=tk.StringVar(value=date.today().isoformat());self.m_reason=tk.StringVar()
-        for label,widget in (("Operação",ctk.CTkComboBox(form,variable=self.m_type,values=["entrada","saida","ajuste","inventario"])),("Produto",ctk.CTkComboBox(form,variable=self.m_product,values=[""])),("Quantidade / nova contagem",ctk.CTkEntry(form,textvariable=self.m_quantity)),("Data (AAAA-MM-DD)",ctk.CTkEntry(form,textvariable=self.m_date)),("Motivo ou observação",ctk.CTkEntry(form,textvariable=self.m_reason))):
-            ctk.CTkLabel(form,text=label,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=20,pady=(0,6));widget.configure(height=40,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface"]);widget.pack(fill="x",padx=20,pady=(0,14));
-            if label=="Produto":self.m_product_combo=widget;widget.configure(command=lambda _v:self.update_current_stock())
+        form=Card(body,width=350);form.grid(row=0,column=0,sticky="ns",padx=(0,16));form.grid_propagate(False);ctk.CTkLabel(form,text="Nova movimentação",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(anchor="w",padx=20,pady=(22,18));self.m_type=tk.StringVar(value="entrada");self.m_product=tk.StringVar();self.m_quantity=tk.StringVar();self.m_reason=tk.StringVar()
+        def field_label(text): ctk.CTkLabel(form,text=text,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=20,pady=(0,6))
+        field_label("Operação")
+        self.m_type_menu=ctk.CTkOptionMenu(form,variable=self.m_type,values=["entrada","saida","ajuste","inventario"],height=40,corner_radius=9,fg_color=COLORS["surface"],button_color=COLORS["surface_alt"],button_hover_color=COLORS["surface_hover"],text_color=COLORS["text"],dropdown_fg_color=COLORS["surface"],dropdown_hover_color=COLORS["accent_soft"])
+        self.m_type_menu.pack(fill="x",padx=20,pady=(0,14))
+        field_label("Produto")
+        self.m_product_combo=ctk.CTkOptionMenu(form,variable=self.m_product,values=[""],height=40,corner_radius=9,fg_color=COLORS["surface"],button_color=COLORS["surface_alt"],button_hover_color=COLORS["surface_hover"],text_color=COLORS["text"],dropdown_fg_color=COLORS["surface"],dropdown_hover_color=COLORS["accent_soft"],command=lambda _v:self.update_current_stock())
+        self.m_product_combo.pack(fill="x",padx=20,pady=(0,14))
+        field_label("Quantidade / nova contagem")
+        ctk.CTkEntry(form,textvariable=self.m_quantity,height=40,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface"]).pack(fill="x",padx=20,pady=(0,14))
+        field_label("Data (DD/MM/AA)")
+        self.m_date_entry=MaskedDateEntry(form,COLORS,initial=date.today())
+        self.m_date_entry.pack(fill="x",padx=20,pady=(0,14))
+        field_label("Motivo ou observação")
+        ctk.CTkEntry(form,textvariable=self.m_reason,height=40,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface"]).pack(fill="x",padx=20,pady=(0,14))
         self.current_stock=ctk.CTkLabel(form,text="Saldo atual: —",height=40,corner_radius=9,fg_color=COLORS["accent_soft"],text_color=COLORS["accent"],font=ctk.CTkFont("Inter",11,"bold"));self.current_stock.pack(fill="x",padx=20,pady=(0,16));ctk.CTkButton(form,text="Registrar movimentação",height=44,corner_radius=10,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.register_movement).pack(fill="x",padx=20,pady=(0,22))
-        history=Card(body);history.grid(row=0,column=1,sticky="nsew");bar=ctk.CTkFrame(history,fg_color="transparent");bar.pack(fill="x",padx=20,pady=18);ctk.CTkLabel(bar,text="Histórico",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(side="left");self.history_filter=tk.StringVar(value="todos");ctk.CTkComboBox(bar,variable=self.history_filter,values=["todos","entrada","saida","ajuste","inventario"],width=150,command=lambda _v:self.refresh_movements()).pack(side="right")
+        history=Card(body);history.grid(row=0,column=1,sticky="nsew");bar=ctk.CTkFrame(history,fg_color="transparent");bar.pack(fill="x",padx=20,pady=18);ctk.CTkLabel(bar,text="Histórico",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(side="left");self.history_filter=tk.StringVar(value="todos");ctk.CTkOptionMenu(bar,variable=self.history_filter,values=["todos","entrada","saida","ajuste","inventario"],width=150,fg_color=COLORS["surface_alt"],button_color=COLORS["surface_hover"],text_color=COLORS["text"],command=lambda _v:self.refresh_movements()).pack(side="right")
         self.history_tree=self.table(history,("date","product","type","quantity","stock","reason"),("Data","Produto","Operação","Alteração","Saldo","Observação"),(90,170,95,90,80,230));self.history_tree.pack(fill="both",expand=True,padx=20,pady=(0,20));self.configure_tables();return page
 
     def product_map(self):return {f"{p['name']}  [{p['unit']}]":int(p["id"]) for p in self.db.products()}
@@ -327,13 +339,13 @@ class EstoqueApp(ctk.CTk):
     def register_movement(self):
         pid=self.product_map().get(self.m_product.get())
         if not pid:messagebox.showwarning(APP_NAME,"Selecione um produto.",parent=self);return
-        try:amount=float(self.m_quantity.get().replace(",","."));datetime.strptime(self.m_date.get(),"%Y-%m-%d");self.db.add_movement(pid,self.m_type.get(),amount,self.m_date.get(),self.m_reason.get().strip())
+        try:amount=float(self.m_quantity.get().replace(",","."));movement_date=self.m_date_entry.get_date();self.db.add_movement(pid,self.m_type.get(),amount,movement_date.isoformat(),self.m_reason.get().strip())
         except ValueError as error:messagebox.showwarning(APP_NAME,str(error)or"Revise a quantidade e a data.",parent=self);return
-        self.m_quantity.set("");self.m_reason.set("");self.m_date.set(date.today().isoformat());self.refresh_all();self.update_current_stock();messagebox.showinfo(APP_NAME,"Movimentação registrada.",parent=self)
+        self.m_quantity.set("");self.m_reason.set("");self.m_date_entry.set_date(date.today());self.refresh_all();self.update_current_stock();messagebox.showinfo(APP_NAME,"Movimentação registrada.",parent=self)
     def refresh_movements(self):
         if not hasattr(self,"history_tree"):return
         mapping=self.product_map();self.m_product_combo.configure(values=list(mapping)or[""]);self.history_tree.delete(*self.history_tree.get_children());labels={"entrada":"Entrada","saida":"Saída","ajuste":"Ajuste","inventario":"Inventário"}
-        for m in self.db.movements(self.history_filter.get()):qty=float(m["quantity"]);self.history_tree.insert("","end",values=(datetime.strptime(m["movement_date"],"%Y-%m-%d").strftime("%d/%m/%Y"),m["name"],labels[m["type"]],f"{'+' if qty>0 else ''}{fmt_number(qty)} {m['unit']}",f"{fmt_number(m['resulting_stock'])} {m['unit']}",m["reason"]))
+        for m in self.db.movements(self.history_filter.get()):qty=float(m["quantity"]);self.history_tree.insert("","end",values=(datetime.strptime(m["movement_date"],"%Y-%m-%d").strftime("%d/%m/%y"),m["name"],labels[m["type"]],f"{'+' if qty>0 else ''}{fmt_number(qty)} {m['unit']}",f"{fmt_number(m['resulting_stock'])} {m['unit']}",m["reason"]))
 
     def settings_page(self):
         page=ctk.CTkFrame(self.content,fg_color="transparent");PageTitle(page,"Configurações","Personalize a aparência e proteja seus dados.").pack(fill="x",pady=(0,22))
