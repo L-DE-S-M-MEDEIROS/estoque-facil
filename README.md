@@ -1,26 +1,30 @@
 # Estoque Fácil
 
-Aplicativo web responsivo para controle manual de estoque. Os dados são armazenados no navegador e podem ser exportados ou restaurados pelas configurações.
+Aplicativo desktop nativo para Windows, desenvolvido em Python com Tkinter e SQLite.
 
 ## Recursos
 
 - Cadastro de produtos sem SKU ou código de barras
 - Foto opcional, categoria, unidade, custo e estoque mínimo
-- Entradas, saídas e ajustes com data editável
-- Inventário integrado às movimentações
-- Histórico completo e filtros por operação
-- Backup e restauração em JSON
-- Consulta de novas versões publicadas no GitHub
+- Aba **Estoque atual** com saldo, situação e valor estimado
+- Entradas, saídas, ajustes e inventário com data editável
+- Histórico completo de movimentações
+- Backup e restauração do banco SQLite
+- Consulta de atualizações pelo GitHub
+- Interface adaptável a Full HD, 2K e 4K, respeitando a escala de DPI do Windows
+- Ícones próprios para cada área do aplicativo
 
-## Desenvolvimento
+## Executar pelo código
 
-```bash
-pnpm install
-pnpm dev
+```powershell
+python -m pip install -r requirements.txt
+python app.py
 ```
 
-Abra `http://localhost:3000`.
+## Gerar o executável
 
-## Atualizações
+```powershell
+.\build-python.ps1
+```
 
-O botão **Buscar atualização** consulta a versão mais recente em Releases. Para publicar uma atualização, ajuste `CURRENT_VERSION`, crie uma tag `vX.Y.Z` e publique uma GitHub Release.
+Os dados são guardados em `%LOCALAPPDATA%\EstoqueFacil\estoque.db`.

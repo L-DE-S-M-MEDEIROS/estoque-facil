@@ -19,6 +19,11 @@
 
 # production
 /build
+/dist
+*.spec
+*.zip
+__pycache__/
+*.py[cod]
 
 # misc
 .DS_Store
