@@ -18,10 +18,10 @@ import customtkinter as ctk
 from PIL import ImageTk
 
 from premium_icons import app_icon, brand_mark, icon
-from premium_widgets import ConfidenceGauge, MaskedDateEntry, confidence_tier
+from premium_widgets import ConfidenceGauge, MaskedDateEntry, TreeConfidenceOverlay, confidence_tier
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "0.8.0"
+APP_VERSION = "0.8.1"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -555,7 +555,7 @@ class EstoqueApp(ctk.CTk):
 
     def table(self,parent,columns,headings,widths):
         tree=ttk.Treeview(parent,columns=columns,show="headings",selectmode="browse")
-        for col,label,width in zip(columns,headings,widths): tree.heading(col,text=label); tree.column(col,width=width,anchor="e" if col in ("minimum","stock","quantity","difference") else "w")
+        for col,label,width in zip(columns,headings,widths): tree.heading(col,text=label,anchor="center"); tree.column(col,width=width,anchor="center")
         return tree
 
     def configure_tables(self):
@@ -600,13 +600,14 @@ class EstoqueApp(ctk.CTk):
         for title in ("Produtos","Unidades em estoque","Abaixo do mínimo","Confiança baixa"):
             card=Card(cards,height=108);card.pack(side="left",fill="both",expand=True,padx=(0,12));card.pack_propagate(False);ctk.CTkLabel(card,text=title,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=18,pady=(17,3));label=ctk.CTkLabel(card,text="0",text_color=COLORS["text"],font=ctk.CTkFont("Inter",22,"bold"));label.pack(anchor="w",padx=18);self.stock_cards.append(label)
         card=Card(page);card.pack(fill="both",expand=True);bar=ctk.CTkFrame(card,fg_color="transparent");bar.pack(fill="x",padx=20,pady=(18,8));ctk.CTkLabel(bar,text="Posição do estoque",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(side="left");self.stock_search=ctk.CTkEntry(bar,placeholder_text="Filtrar produto, grupo ou variação...",width=300,height=38,corner_radius=9);self.stock_search.pack(side="right");self.stock_search.bind("<KeyRelease>",lambda e:self.refresh_stock())
-        self.stock_tree=self.table(card,("group","name","variant","stock","unit","minimum","status","confidence"),("Grupo / modelo","Produto","Variação","Saldo atual","Un.","Mínimo","Situação","Confiança"),(145,160,125,80,45,60,100,105));self.stock_tree.pack(fill="both",expand=True,padx=20,pady=(8,20));self.configure_tables();return page
+        self.stock_tree=self.table(card,("group","name","variant","stock","unit","minimum","status","confidence"),("Grupo / modelo","Produto","Variação","Saldo atual","Un.","Mínimo","Situação","Confiança"),(145,160,125,80,45,60,100,105));self.stock_tree.pack(fill="both",expand=True,padx=20,pady=(8,20));self.stock_confidence_cells=TreeConfidenceOverlay(self.stock_tree,COLORS);self.configure_tables();return page
 
     def refresh_stock(self):
         if not hasattr(self,"stock_tree"):return
-        items=self.db.products(self.stock_search.get() if hasattr(self,"stock_search") else "");self.stock_tree.delete(*self.stock_tree.get_children());units=low=low_confidence=0
+        items=self.db.products(self.stock_search.get() if hasattr(self,"stock_search") else "");self.stock_tree.delete(*self.stock_tree.get_children());units=low=low_confidence=0;scores={}
         for p in items:
-            stock=float(p["stock"]);units+=stock;status="Sem estoque" if stock<=0 else "Estoque baixo" if stock<=float(p["minimum"]) else "Normal";low+=status!="Normal";trust=self.db.stock_confidence(int(p["id"]),stock);low_confidence+=trust["level"]=="Baixa";self.stock_tree.insert("","end",iid=str(p["id"]),values=(p["group_name"]or"Sem grupo",p["name"],p["variant"]or"—",fmt_number(stock),p["unit"],fmt_number(p["minimum"]),status,f"{trust['score']}% • {trust['level']}"))
+            stock=float(p["stock"]);units+=stock;status="Sem estoque" if stock<=0 else "Estoque baixo" if stock<=float(p["minimum"]) else "Normal";low+=status!="Normal";trust=self.db.stock_confidence(int(p["id"]),stock);low_confidence+=trust["level"]=="Baixa";scores[int(p["id"])]=trust["score"];self.stock_tree.insert("","end",iid=str(p["id"]),values=(p["group_name"]or"Sem grupo",p["name"],p["variant"]or"—",fmt_number(stock),p["unit"],fmt_number(p["minimum"]),status,""))
+        self.stock_confidence_cells.set_scores(scores)
         for label,text in zip(self.stock_cards,(str(len(items)),fmt_number(units),str(low),str(low_confidence))):label.configure(text=text)
 
     def count_page(self):
@@ -642,7 +643,7 @@ class EstoqueApp(ctk.CTk):
         self.confidence_description=ctk.CTkLabel(confidence_text,text="Visão geral calculada a partir de todos os produtos cadastrados.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10),justify="left",anchor="nw",wraplength=460);self.confidence_description.pack(fill="x",pady=(7,9))
         legend=ctk.CTkFrame(confidence_text,fg_color="transparent");legend.pack(fill="x")
         for text,color in (("● Baixa",("#C94B4B","#FF6B6B")),("● Média",("#B77912","#FFD166")),("● Alta",("#27845E","#4ADE80")),("● Máxima",("#2478C4","#38BDF8"))):ctk.CTkLabel(legend,text=text,text_color=color,font=ctk.CTkFont("Inter",9,"bold")).pack(side="left",padx=(0,14))
-        self.count_tree=self.table(listing,("product","stock","checkin","date","responsible","confidence","difference"),("Produto","Estoque atual","Check-in","Data","Responsável","Confiança","Diferença"),(170,75,75,70,80,85,85));self.count_tree.pack(fill="both",expand=True,padx=20,pady=(0,20));self.count_tree.bind("<<TreeviewSelect>>",lambda _e:self.update_confidence_gauge());self.count_tree.bind("<Double-1>",lambda _e:self.prepare_count());self.configure_tables();return page
+        self.count_tree=self.table(listing,("product","stock","checkin","date","responsible","confidence","difference"),("Produto","Estoque atual","Check-in","Data","Responsável","Confiança","Diferença"),(170,75,75,70,80,85,85));self.count_tree.pack(fill="both",expand=True,padx=20,pady=(0,20));self.count_tree.bind("<<TreeviewSelect>>",lambda _e:self.update_confidence_gauge());self.count_tree.bind("<Double-1>",lambda _e:self.prepare_count());self.count_confidence_cells=TreeConfidenceOverlay(self.count_tree,COLORS,activate=self.prepare_count);self.configure_tables();return page
 
     def update_count_current(self):
         pid=self.product_map().get(self.c_product.get()) if hasattr(self,"c_product") else None
@@ -688,7 +689,7 @@ class EstoqueApp(ctk.CTk):
 
     def refresh_counts(self):
         if not hasattr(self,"count_tree"):return
-        mapping=self.product_map();self.c_product_combo.configure(values=list(mapping)or[""]);search=self.count_search.get() if hasattr(self,"count_search") else "";items=self.db.products(search);self.count_tree.delete(*self.count_tree.get_children());all_items=self.db.products();pending=counted_today=differences_today=total_score=0;today=date.today().isoformat();infos={}
+        mapping=self.product_map();self.c_product_combo.configure(values=list(mapping)or[""]);search=self.count_search.get() if hasattr(self,"count_search") else "";items=self.db.products(search);self.count_tree.delete(*self.count_tree.get_children());all_items=self.db.products();pending=counted_today=differences_today=total_score=0;today=date.today().isoformat();infos={};visible_scores={}
         for p in all_items:
             trust=self.db.stock_confidence(int(p["id"]),float(p["stock"]));infos[int(p["id"])]=trust;pending+=trust["checkin"]=="PENDENTE";counted_today+=trust["last_date"]==today;differences_today+=trust["last_date"]==today and trust["last_difference"] is not None and abs(trust["last_difference"])>.0000001;total_score+=trust["score"]
         selected_filter=self.count_filter.get() if hasattr(self,"count_filter") else "todos"
@@ -696,7 +697,8 @@ class EstoqueApp(ctk.CTk):
             trust=infos[int(p["id"])];
             if selected_filter=="pendentes" and trust["checkin"]!="PENDENTE":continue
             if selected_filter=="verificados" and trust["checkin"]!="VERIFICADO":continue
-            last=datetime.strptime(trust["last_date"],"%Y-%m-%d").strftime("%d/%m/%y") if trust["last_date"] else "—";difference="—" if trust["last_difference"] is None else f"{'+' if trust['last_difference']>0 else ''}{fmt_number(trust['last_difference'])} {p['unit']}";self.count_tree.insert("","end",iid=str(p["id"]),values=(product_label(p),f"{fmt_number(p['stock'])} {p['unit']}",trust["checkin"],last,trust["checked_by"]or"—",f"{trust['score']}% • {trust['level']}",difference))
+            last=datetime.strptime(trust["last_date"],"%Y-%m-%d").strftime("%d/%m/%y") if trust["last_date"] else "—";difference="—" if trust["last_difference"] is None else f"{'+' if trust['last_difference']>0 else ''}{fmt_number(trust['last_difference'])} {p['unit']}";visible_scores[int(p["id"])]=trust["score"];self.count_tree.insert("","end",iid=str(p["id"]),values=(product_label(p),f"{fmt_number(p['stock'])} {p['unit']}",trust["checkin"],last,trust["checked_by"]or"—","",difference))
+        self.count_confidence_cells.set_scores(visible_scores)
         average=round(total_score/len(all_items)) if all_items else 0
         for label,text in zip(self.count_cards,(str(pending),str(counted_today),str(differences_today),f"{average}%")):label.configure(text=text)
         if hasattr(self,"confidence_gauge") and not self.count_tree.selection():
@@ -774,6 +776,8 @@ class EstoqueApp(ctk.CTk):
     def change_theme(self,value):
         self.settings["theme"]=value;self.save_settings();ctk.set_appearance_mode(value);self.configure_tables()
         if hasattr(self,"confidence_gauge"):self.confidence_gauge.redraw()
+        if hasattr(self,"stock_confidence_cells"):self.stock_confidence_cells.schedule()
+        if hasattr(self,"count_confidence_cells"):self.count_confidence_cells.schedule()
     def check_updates(self):
         try:
             req=urllib.request.Request(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",headers={"User-Agent":APP_NAME});release=json.load(urllib.request.urlopen(req,timeout=10));latest=release["tag_name"].lstrip("v")

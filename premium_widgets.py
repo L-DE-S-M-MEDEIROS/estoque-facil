@@ -6,7 +6,7 @@ import math
 import tkinter as tk
 
 import customtkinter as ctk
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 
 from premium_icons import icon
 
@@ -29,6 +29,107 @@ def _appearance_color(value: str | tuple[str, str]) -> str:
     if isinstance(value, tuple):
         return value[1] if ctk.get_appearance_mode() == "Dark" else value[0]
     return value
+
+
+def mini_confidence_gauge(score: int, colors: dict, width: int = 66, height: int = 28) -> Image.Image:
+    """Render a compact, antialiased confidence dial for a table cell."""
+    scale = 4
+    pixel_width, pixel_height = width * scale, height * scale
+    image = Image.new("RGBA", (pixel_width, pixel_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    center_x, center_y = pixel_width // 2, round(pixel_height * .92)
+    radius = min(round(pixel_width * .39), round(pixel_height * .82))
+    stroke = max(8, round(pixel_width * .085))
+    box = (center_x - radius, center_y - radius, center_x + radius, center_y + radius)
+    bounded = max(0, min(100, int(score)))
+    _level, tier_color = confidence_tier(bounded)
+    color = _appearance_color(tier_color)
+    draw.arc(box, start=180, end=360, fill=_appearance_color(colors["border"]), width=stroke)
+    draw.arc(box, start=180, end=180 + bounded * 1.8, fill=color, width=stroke)
+    angle = math.pi - math.pi * bounded / 100
+    needle_radius = radius - round(stroke * .55)
+    draw.line(
+        (
+            center_x,
+            center_y,
+            center_x + needle_radius * math.cos(angle),
+            center_y - needle_radius * math.sin(angle),
+        ),
+        fill=color,
+        width=max(5, stroke // 3),
+    )
+    hub = max(6, stroke // 2)
+    draw.ellipse((center_x - hub, center_y - hub, center_x + hub, center_y + hub), fill=color)
+    return image.resize((width, height), Image.Resampling.LANCZOS)
+
+
+class TreeConfidenceOverlay:
+    """Place crisp confidence dials over a ttk.Treeview confidence column."""
+
+    def __init__(self, tree, colors: dict, column: str = "confidence", activate=None):
+        self.tree, self.colors, self.column, self.activate = tree, colors, column, activate
+        self.scores: dict[str, int] = {}
+        self.labels: list[tk.Label] = []
+        self.images: list[ImageTk.PhotoImage] = []
+        self._job = None
+        for event in ("<Configure>", "<Expose>", "<MouseWheel>", "<Button-4>", "<Button-5>", "<KeyRelease>", "<ButtonRelease-1>", "<<TreeviewSelect>>"):
+            self.tree.bind(event, self.schedule, add="+")
+
+    def set_scores(self, scores: dict[int | str, int]):
+        self.scores = {str(item_id): int(score) for item_id, score in scores.items()}
+        self.schedule()
+
+    def schedule(self, _event=None):
+        if not self.tree.winfo_exists():
+            return
+        if self._job is not None:
+            self.tree.after_cancel(self._job)
+        self._job = self.tree.after_idle(self.redraw)
+
+    def _select(self, item_id: str):
+        self.tree.selection_set(item_id)
+        self.tree.focus(item_id)
+        self.tree.event_generate("<<TreeviewSelect>>")
+
+    def _open(self, item_id: str):
+        self._select(item_id)
+        if self.activate:
+            self.activate()
+
+    def redraw(self):
+        self._job = None
+        for label in self.labels:
+            label.destroy()
+        self.labels.clear()
+        self.images.clear()
+        if not self.tree.winfo_exists():
+            return
+
+        selected = set(self.tree.selection())
+        normal_background = _appearance_color(self.colors["surface"])
+        selected_background = "#203C52" if ctk.get_appearance_mode() == "Dark" else "#DDEFFC"
+        for item_id, score in self.scores.items():
+            bounds = self.tree.bbox(item_id, self.column)
+            if not bounds:
+                continue
+            x, y, cell_width, cell_height = bounds
+            image_width = max(44, min(70, cell_width - 10))
+            image_height = max(22, min(29, cell_height - 5))
+            rendered = mini_confidence_gauge(score, self.colors, image_width, image_height)
+            photo = ImageTk.PhotoImage(rendered)
+            label = tk.Label(
+                self.tree,
+                image=photo,
+                background=selected_background if item_id in selected else normal_background,
+                borderwidth=0,
+                highlightthickness=0,
+                cursor="hand2",
+            )
+            label.bind("<Button-1>", lambda _event, current=item_id: self._select(current))
+            label.bind("<Double-Button-1>", lambda _event, current=item_id: self._open(current))
+            label.place(x=x + (cell_width - image_width) // 2, y=y + (cell_height - image_height) // 2)
+            self.labels.append(label)
+            self.images.append(photo)
 
 
 class ConfidenceGauge(ctk.CTkFrame):

@@ -11,6 +11,7 @@ Aplicativo desktop nativo para Windows, desenvolvido em Python com Tkinter e SQL
 - Aba **Contagem** no formato de check-in da planilha, com quantidade física, data e responsável
 - Índice de confiança calculado pelos dias, frequência e volume movimentado desde a última contagem
 - Velocímetro de confiança por produto: baixa em vermelho, média em amarelo, alta em verde e máxima em azul
+- Mini velocímetros substituem os percentuais nas colunas de confiança das tabelas
 - Entradas, saídas, ajustes e inventário com data editável
 - Edição e exclusão de movimentações com recálculo seguro dos saldos
 - Campo de data mascarado em `dd/mm/aa` e calendário para seleção com o mouse
