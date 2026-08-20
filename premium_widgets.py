@@ -26,6 +26,14 @@ STOCK_QUANTITY_TIERS = (
     (0, ("#8F2433", "#FF5D6C")),
 )
 
+COUNT_AGE_TIERS = (
+    (61, ("#8F2433", "#FF5D6C")),
+    (31, ("#D45A32", "#FF8A5C")),
+    (8, ("#A87500", "#FFD166")),
+    (1, ("#27845E", "#4ADE80")),
+    (0, ("#2478C4", "#38BDF8")),
+)
+
 
 def confidence_tier(score: int) -> tuple[str, tuple[str, str]]:
     """Return the label and theme-aware color for a confidence score."""
@@ -37,6 +45,12 @@ def stock_quantity_color(quantity: float) -> tuple[str, str]:
     """Return the requested theme-aware stock color for a quantity."""
     value = max(0.0, float(quantity))
     return next(color for minimum, color in STOCK_QUANTITY_TIERS if value >= minimum)
+
+
+def count_age_color(days: int | None) -> tuple[str, str]:
+    """Return a progressively more urgent color as a count gets older."""
+    value = 10_000 if days is None else max(0, int(days))
+    return next(color for minimum, color in COUNT_AGE_TIERS if value >= minimum)
 
 
 def _appearance_color(value: str | tuple[str, str]) -> str:
@@ -94,7 +108,11 @@ class TreeConfidenceOverlay:
         self.schedule()
 
     def schedule(self, _event=None):
-        if not self.tree.winfo_exists():
+        try:
+            exists = self.tree.winfo_exists()
+        except tk.TclError:
+            return
+        if not exists:
             return
         if self._job is not None:
             self.tree.after_cancel(self._job)
@@ -196,7 +214,101 @@ class TreeStockOverlay(TreeConfidenceOverlay):
             )
             label.bind("<Button-1>", lambda _event, current=item_id: self._select(current))
             label.bind("<MouseWheel>", self._scroll)
-            label.place(x=x, y=y, width=cell_width, height=cell_height)
+            label.place(x=x, y=y, width=cell_width, height=max(1, cell_height - 1))
+            self.labels.append(label)
+
+
+class TreeRowSeparatorOverlay:
+    """Draw a subtle one-pixel line between every visible Treeview row."""
+
+    def __init__(self, tree, colors: dict):
+        self.tree, self.colors = tree, colors
+        self.lines: list[tk.Frame] = []
+        self._job = None
+        for event in ("<Configure>", "<MouseWheel>", "<Button-4>", "<Button-5>", "<KeyRelease>", "<ButtonRelease-1>"):
+            self.tree.bind(event, self.schedule, add="+")
+
+    def schedule(self, _event=None):
+        try:
+            exists = self.tree.winfo_exists()
+        except tk.TclError:
+            return
+        if not exists:
+            return
+        if self._job is not None:
+            self.tree.after_cancel(self._job)
+        self._job = self.tree.after_idle(self.redraw)
+
+    def _scroll(self, event):
+        direction = -1 if event.delta > 0 else 1
+        self.tree.yview_scroll(direction, "units")
+        self.schedule()
+        return "break"
+
+    def redraw(self):
+        self._job = None
+        for line in self.lines:
+            line.destroy()
+        self.lines.clear()
+        if not self.tree.winfo_exists():
+            return
+        color = "#27303D" if ctk.get_appearance_mode() == "Dark" else "#E5E9ED"
+        width = max(1, self.tree.winfo_width())
+        for item_id in self.tree.get_children(""):
+            bounds = self.tree.bbox(item_id)
+            if not bounds:
+                continue
+            _x, y, _cell_width, row_height = bounds
+            line = tk.Frame(self.tree, height=1, background=color, borderwidth=0, highlightthickness=0)
+            line.bind("<MouseWheel>", self._scroll)
+            line.place(x=0, y=y + row_height - 1, width=width, height=1)
+            self.lines.append(line)
+
+
+class TreeRelativeDateOverlay(TreeConfidenceOverlay):
+    """Show relative count ages with urgency colors in a Treeview column."""
+
+    def __init__(self, tree, colors: dict, column: str = "date"):
+        super().__init__(tree, colors, column=column)
+        self.ages: dict[str, tuple[int | None, str]] = {}
+
+    def set_ages(self, ages: dict[int | str, tuple[int | None, str]]):
+        self.ages = {
+            str(item_id): (days, str(display))
+            for item_id, (days, display) in ages.items()
+        }
+        self.schedule()
+
+    def redraw(self):
+        self._job = None
+        for label in self.labels:
+            label.destroy()
+        self.labels.clear()
+        self.images.clear()
+        if not self.tree.winfo_exists():
+            return
+
+        selected = set(self.tree.selection())
+        normal_background = _appearance_color(self.colors["surface"])
+        selected_background = "#203C52" if ctk.get_appearance_mode() == "Dark" else "#DDEFFC"
+        for item_id, (days, display) in self.ages.items():
+            bounds = self.tree.bbox(item_id, self.column)
+            if not bounds:
+                continue
+            x, y, cell_width, cell_height = bounds
+            label = tk.Label(
+                self.tree,
+                text=display,
+                foreground=_appearance_color(count_age_color(days)),
+                background=selected_background if item_id in selected else normal_background,
+                borderwidth=0,
+                highlightthickness=0,
+                font=("Inter", 10, "bold"),
+                cursor="hand2",
+            )
+            label.bind("<Button-1>", lambda _event, current=item_id: self._select(current))
+            label.bind("<MouseWheel>", self._scroll)
+            label.place(x=x, y=y, width=cell_width, height=max(1, cell_height - 1))
             self.labels.append(label)
 
 

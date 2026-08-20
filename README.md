@@ -6,22 +6,27 @@ Aplicativo desktop nativo para Windows, desenvolvido em Python com Tkinter e SQL
 
 - Cadastro de produtos sem SKU ou código de barras
 - Organização por Categoria, Grupo/modelo e Variação, mantendo estoque independente
+- Cadastro separado de grupos, com reaproveitamento dos grupos salvos ao criar ou editar produtos
 - Foto opcional, categoria, unidade e estoque mínimo
 - Aba **Estoque atual** com saldo, situação e confiança; a última contagem fica somente na aba **Contagem**
 - Estoque atual agrupado com separadores visuais, produtos em ordem alfabética e saldos coloridos por quantidade
 - Aba **Contagem** no formato de check-in da planilha, com quantidade física, data e responsável
-- Aba **Cadastro** com gerenciadores separados e ilustrados para Usuários, Operações e Produtos
-- Operações personalizadas configuráveis para somar ou retirar unidades do estoque
+- Última contagem em tempo relativo e colorido: hoje, dias, semanas, meses ou anos atrás
+- Aba **Cadastro** com gerenciadores separados e ilustrados para Usuários, Operações, Grupos e Produtos
+- Operações padrão e personalizadas visíveis no mesmo gerenciador, com edição e remoção segura
 - Movimentações em lote no estilo carrinho: vários produtos, uma operação, data, observação e usuário responsável
 - Revisão, edição e remoção dos itens antes de salvar o conjunto
+- Pesquisa rápida na movimentação por parte do nome, grupo, variação ou categoria, ignorando diferenças de acento e maiúsculas
 - Índice de confiança calculado pelos dias, frequência e volume movimentado desde a última contagem
 - Medidores de confiança: vermelho de 0% a 40%, amarelo de 41% a 60%, verde de 61% a 89% e azul de 90% a 100%
 - Mini velocímetros substituem os percentuais nas colunas de confiança das tabelas
+- Linhas divisórias finas e adaptadas ao tema em todas as tabelas do aplicativo
 - Entradas, saídas, ajustes e inventário com data editável
 - Edição e exclusão de movimentações com recálculo seguro dos saldos
 - Campo de data mascarado em `dd/mm/aa` e calendário para seleção com o mouse
 - Histórico completo de movimentações
 - Backup e restauração do banco SQLite
+- A exclusão geral de todos os dados não fica disponível na interface
 - Consulta de atualizações pelo GitHub
 - Interface adaptável a Full HD, 2K e 4K, respeitando a escala de DPI do Windows
 - Temas Light off-white e Dark grafite com azul neon

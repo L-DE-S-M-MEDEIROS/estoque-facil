@@ -64,6 +64,11 @@ def _draw_icon(name: str, color: str, size: int = 256) -> Image.Image:
         draw.line((p(7), p(9), p(17), p(9)), **line)
         draw.line((p(7), p(15), p(14), p(15)), **line)
         draw.line((p(17), p(13), p(17), p(17)), **line)
+    elif name == "group":
+        draw.rounded_rectangle((p(3), p(4), p(21), p(10)), radius=p(1.5), outline=color, width=width)
+        draw.rounded_rectangle((p(3), p(13), p(21), p(19)), radius=p(1.5), outline=color, width=width)
+        draw.line((p(7), p(10), p(7), p(13)), **line)
+        draw.line((p(17), p(10), p(17), p(13)), **line)
     elif name == "user":
         draw.ellipse((p(8), p(3), p(16), p(11)), outline=color, width=width)
         draw.arc((p(4), p(10), p(20), p(23)), 190, 350, fill=color, width=width)
