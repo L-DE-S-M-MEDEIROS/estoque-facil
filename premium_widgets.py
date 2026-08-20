@@ -18,11 +18,25 @@ CONFIDENCE_TIERS = (
     (0, "Baixa", ("#C94B4B", "#FF6B6B")),
 )
 
+STOCK_QUANTITY_TIERS = (
+    (100, ("#2478C4", "#38BDF8")),
+    (50, ("#27845E", "#4ADE80")),
+    (31, ("#A87500", "#FFD166")),
+    (1, ("#D45A32", "#FF8A5C")),
+    (0, ("#8F2433", "#FF5D6C")),
+)
+
 
 def confidence_tier(score: int) -> tuple[str, tuple[str, str]]:
     """Return the label and theme-aware color for a confidence score."""
     bounded = max(0, min(100, int(score)))
     return next((label, color) for minimum, label, color in CONFIDENCE_TIERS if bounded >= minimum)
+
+
+def stock_quantity_color(quantity: float) -> tuple[str, str]:
+    """Return the requested theme-aware stock color for a quantity."""
+    value = max(0.0, float(quantity))
+    return next(color for minimum, color in STOCK_QUANTITY_TIERS if value >= minimum)
 
 
 def _appearance_color(value: str | tuple[str, str]) -> str:
@@ -137,6 +151,53 @@ class TreeConfidenceOverlay:
             label.place(x=x + (cell_width - image_width) // 2, y=y + (cell_height - image_height) // 2)
             self.labels.append(label)
             self.images.append(photo)
+
+
+class TreeStockOverlay(TreeConfidenceOverlay):
+    """Color the numeric stock value without changing the rest of the row."""
+
+    def __init__(self, tree, colors: dict, column: str = "stock"):
+        super().__init__(tree, colors, column=column)
+        self.quantities: dict[str, tuple[float, str]] = {}
+
+    def set_quantities(self, quantities: dict[int | str, tuple[float, str]]):
+        self.quantities = {
+            str(item_id): (float(quantity), str(display))
+            for item_id, (quantity, display) in quantities.items()
+        }
+        self.schedule()
+
+    def redraw(self):
+        self._job = None
+        for label in self.labels:
+            label.destroy()
+        self.labels.clear()
+        self.images.clear()
+        if not self.tree.winfo_exists():
+            return
+
+        selected = set(self.tree.selection())
+        normal_background = _appearance_color(self.colors["surface"])
+        selected_background = "#203C52" if ctk.get_appearance_mode() == "Dark" else "#DDEFFC"
+        for item_id, (quantity, display) in self.quantities.items():
+            bounds = self.tree.bbox(item_id, self.column)
+            if not bounds:
+                continue
+            x, y, cell_width, cell_height = bounds
+            label = tk.Label(
+                self.tree,
+                text=display,
+                foreground=_appearance_color(stock_quantity_color(quantity)),
+                background=selected_background if item_id in selected else normal_background,
+                borderwidth=0,
+                highlightthickness=0,
+                font=("Inter", 11, "bold"),
+                cursor="hand2",
+            )
+            label.bind("<Button-1>", lambda _event, current=item_id: self._select(current))
+            label.bind("<MouseWheel>", self._scroll)
+            label.place(x=x, y=y, width=cell_width, height=cell_height)
+            self.labels.append(label)
 
 
 class ConfidenceGauge(ctk.CTkFrame):

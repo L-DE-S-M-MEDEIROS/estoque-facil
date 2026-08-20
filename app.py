@@ -18,10 +18,10 @@ import customtkinter as ctk
 from PIL import ImageTk
 
 from premium_icons import app_icon, brand_mark, icon
-from premium_widgets import MaskedDateEntry, TreeConfidenceOverlay, confidence_tier
+from premium_widgets import MaskedDateEntry, TreeConfidenceOverlay, TreeStockOverlay, confidence_tier
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "0.8.2"
+APP_VERSION = "0.9.0"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -195,7 +195,9 @@ class Database:
         return self.db.execute("""SELECT p.*,COALESCE(SUM(m.quantity),0) stock
             FROM products p LEFT JOIN movements m ON m.product_id=p.id
             WHERE p.name LIKE ? OR p.category LIKE ? OR p.group_name LIKE ? OR p.variant LIKE ?
-            GROUP BY p.id ORDER BY p.group_name COLLATE NOCASE,p.name COLLATE NOCASE,p.variant COLLATE NOCASE""", (term, term, term, term)).fetchall()
+            GROUP BY p.id ORDER BY
+                CASE WHEN TRIM(COALESCE(p.group_name,''))='' THEN 1 ELSE 0 END,
+                p.group_name COLLATE NOCASE,p.name COLLATE NOCASE,p.variant COLLATE NOCASE""", (term, term, term, term)).fetchall()
 
     def groups(self) -> list[str]:
         return [row["group_name"] for row in self.db.execute("SELECT DISTINCT group_name FROM products WHERE group_name<>'' ORDER BY group_name COLLATE NOCASE")]
@@ -561,6 +563,7 @@ class EstoqueApp(ctk.CTk):
     def configure_tables(self):
         dark=ctk.get_appearance_mode()=="Dark"; bg="#121824" if dark else "#FFFFFF"; fg="#F3F7FB" if dark else "#202936"; head="#192232" if dark else "#EEF3F8"; selected="#203C52" if dark else "#DDEFFC"
         style=ttk.Style(self); style.theme_use("clam"); style.configure("Treeview",background=bg,fieldbackground=bg,foreground=fg,rowheight=max(38,round(34*self.ui_scale)),borderwidth=0,font=("Inter",10)); style.configure("Treeview.Heading",background=head,foreground=fg,relief="flat",font=("Inter",9,"bold"),padding=10); style.map("Treeview",background=[("selected",selected)],foreground=[("selected",fg)])
+        if hasattr(self,"stock_tree"):self.stock_tree.tag_configure("group_header",background="#17293B" if dark else "#E4F0F7",foreground="#8BD5FF" if dark else "#245F89",font=("Inter",10,"bold"))
 
     def products_page(self):
         page=ctk.CTkFrame(self.content,fg_color="transparent"); PageTitle(page,"Produtos","Cadastre e organize os itens do seu estoque.").pack(fill="x",pady=(0,22))
@@ -599,15 +602,18 @@ class EstoqueApp(ctk.CTk):
         page=ctk.CTkFrame(self.content,fg_color="transparent");PageTitle(page,"Estoque atual","Uma visão clara dos saldos e itens que precisam de atenção.").pack(fill="x",pady=(0,22));cards=ctk.CTkFrame(page,fg_color="transparent");cards.pack(fill="x",pady=(0,16));self.stock_cards=[]
         for title in ("Produtos","Unidades em estoque","Abaixo do mínimo","Confiança baixa"):
             card=Card(cards,height=108);card.pack(side="left",fill="both",expand=True,padx=(0,12));card.pack_propagate(False);ctk.CTkLabel(card,text=title,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=18,pady=(17,3));label=ctk.CTkLabel(card,text="0",text_color=COLORS["text"],font=ctk.CTkFont("Inter",22,"bold"));label.pack(anchor="w",padx=18);self.stock_cards.append(label)
-        card=Card(page);card.pack(fill="both",expand=True);bar=ctk.CTkFrame(card,fg_color="transparent");bar.pack(fill="x",padx=20,pady=(18,8));ctk.CTkLabel(bar,text="Posição do estoque",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(side="left");self.stock_search=ctk.CTkEntry(bar,placeholder_text="Filtrar produto, grupo ou variação...",width=300,height=38,corner_radius=9);self.stock_search.pack(side="right");self.stock_search.bind("<KeyRelease>",lambda e:self.refresh_stock())
-        self.stock_tree=self.table(card,("group","name","variant","stock","unit","minimum","status","confidence"),("Grupo / modelo","Produto","Variação","Saldo atual","Un.","Mínimo","Situação","Confiança"),(145,160,125,80,45,60,100,105));self.stock_tree.pack(fill="both",expand=True,padx=20,pady=(8,20));self.stock_confidence_cells=TreeConfidenceOverlay(self.stock_tree,COLORS);self.configure_tables();return page
+        card=Card(page);card.pack(fill="both",expand=True);bar=ctk.CTkFrame(card,fg_color="transparent");bar.pack(fill="x",padx=20,pady=(18,8));ctk.CTkLabel(bar,text="Posição do estoque",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(side="left");self.stock_search=ctk.CTkEntry(bar,placeholder_text="Filtrar produto ou grupo...",width=300,height=38,corner_radius=9);self.stock_search.pack(side="right");self.stock_search.bind("<KeyRelease>",lambda e:self.refresh_stock())
+        self.stock_tree=self.table(card,("group","name","stock","confidence"),("Grupo / modelo","Produto","Saldo atual","Confiança"),(220,320,140,140));self.stock_tree.pack(fill="both",expand=True,padx=20,pady=(8,20));self.stock_confidence_cells=TreeConfidenceOverlay(self.stock_tree,COLORS);self.stock_quantity_cells=TreeStockOverlay(self.stock_tree,COLORS);self.configure_tables();return page
 
     def refresh_stock(self):
         if not hasattr(self,"stock_tree"):return
-        items=self.db.products(self.stock_search.get() if hasattr(self,"stock_search") else "");self.stock_tree.delete(*self.stock_tree.get_children());units=low=low_confidence=0;scores={}
+        items=self.db.products(self.stock_search.get() if hasattr(self,"stock_search") else "");self.stock_tree.delete(*self.stock_tree.get_children());units=low=low_confidence=0;scores={};quantities={};current_group=None;group_index=0
         for p in items:
-            stock=float(p["stock"]);units+=stock;status="Sem estoque" if stock<=0 else "Estoque baixo" if stock<=float(p["minimum"]) else "Normal";low+=status!="Normal";trust=self.db.stock_confidence(int(p["id"]),stock);low_confidence+=trust["level"]=="Baixa";scores[int(p["id"])]=trust["score"];self.stock_tree.insert("","end",iid=str(p["id"]),values=(p["group_name"]or"Sem grupo",p["name"],p["variant"]or"—",fmt_number(stock),p["unit"],fmt_number(p["minimum"]),status,""))
+            group=(p["group_name"]or"").strip()or"Sem grupo";group_key=group.casefold()
+            if group_key!=current_group:group_index+=1;current_group=group_key;self.stock_tree.insert("","end",iid=f"group:{group_index}",values=(f"—  {group.upper()}  —","","",""),tags=("group_header",))
+            stock=float(p["stock"]);units+=stock;status="Sem estoque" if stock<=0 else "Estoque baixo" if stock<=float(p["minimum"]) else "Normal";low+=status!="Normal";trust=self.db.stock_confidence(int(p["id"]),stock);low_confidence+=trust["level"]=="Baixa";scores[int(p["id"])]=trust["score"];quantities[int(p["id"])]=(stock,fmt_number(stock));self.stock_tree.insert("","end",iid=str(p["id"]),values=("",p["name"],"",""))
         self.stock_confidence_cells.set_scores(scores)
+        self.stock_quantity_cells.set_quantities(quantities)
         for label,text in zip(self.stock_cards,(str(len(items)),fmt_number(units),str(low),str(low_confidence))):label.configure(text=text)
 
     def count_page(self):
@@ -758,6 +764,7 @@ class EstoqueApp(ctk.CTk):
     def change_theme(self,value):
         self.settings["theme"]=value;self.save_settings();ctk.set_appearance_mode(value);self.configure_tables()
         if hasattr(self,"stock_confidence_cells"):self.stock_confidence_cells.schedule()
+        if hasattr(self,"stock_quantity_cells"):self.stock_quantity_cells.schedule()
         if hasattr(self,"count_confidence_cells"):self.count_confidence_cells.schedule()
     def check_updates(self):
         try:
