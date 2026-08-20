@@ -20,9 +20,10 @@ from PIL import ImageTk
 
 from premium_icons import app_icon, brand_mark, icon
 from premium_widgets import MaskedDateEntry, TreeConfidenceOverlay, TreeRelativeDateOverlay, TreeRowSeparatorOverlay, TreeStockOverlay, confidence_tier
+from cloud_sync import CloudSync, CloudSyncError
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -978,13 +979,57 @@ class MovementDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class CloudLoginDialog(ctk.CTkToplevel):
+    def __init__(self, parent: "EstoqueApp"):
+        super().__init__(parent, fg_color=COLORS["background"])
+        self.parent = parent
+        self.title("Entrar no Supabase")
+        self.geometry(f"480x410+{parent.winfo_x()+180}+{parent.winfo_y()+100}")
+        self.resizable(False, False); self.transient(parent); self.grab_set()
+        self.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(self, text="SINCRONIZAÇÃO SEGURA", text_color=COLORS["accent"], font=ctk.CTkFont("Inter", 10, "bold")).grid(row=0,column=0,sticky="w",padx=32,pady=(30,4))
+        ctk.CTkLabel(self, text="Sua conta na nuvem", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 23, "bold")).grid(row=1,column=0,sticky="w",padx=32)
+        ctk.CTkLabel(self, text="Use um e-mail e uma senha exclusivos para proteger o estoque.\nA senha não fica salva no aplicativo.", justify="left", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 11)).grid(row=2,column=0,sticky="w",padx=32,pady=(7,22))
+        self.email = ctk.CTkEntry(self, placeholder_text="E-mail", height=42)
+        self.email.grid(row=3,column=0,sticky="ew",padx=32,pady=6);self.email.insert(0,parent.cloud.email)
+        self.password = ctk.CTkEntry(self, placeholder_text="Senha (mínimo de 6 caracteres)", show="•", height=42)
+        self.password.grid(row=4,column=0,sticky="ew",padx=32,pady=6)
+        actions=ctk.CTkFrame(self,fg_color="transparent");actions.grid(row=5,column=0,sticky="ew",padx=32,pady=(18,8));actions.grid_columnconfigure((0,1),weight=1)
+        ctk.CTkButton(actions,text="Criar conta",height=42,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.sign_up).grid(row=0,column=0,sticky="ew",padx=(0,6))
+        ctk.CTkButton(actions,text="Entrar",height=42,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.sign_in).grid(row=0,column=1,sticky="ew",padx=(6,0))
+        self.password.bind("<Return>",lambda _event:self.sign_in());self.email.focus_set()
+
+    def credentials(self):
+        email,password=self.email.get().strip(),self.password.get()
+        if "@" not in email or len(password)<6:
+            messagebox.showwarning(APP_NAME,"Informe um e-mail válido e uma senha com pelo menos 6 caracteres.",parent=self);return None
+        return email,password
+
+    def sign_in(self):
+        credentials=self.credentials()
+        if not credentials:return
+        try:self.parent.cloud.sign_in(*credentials);self.parent.save_settings()
+        except CloudSyncError as error:messagebox.showerror(APP_NAME,str(error),parent=self);return
+        self.destroy();self.parent.update_cloud_status();messagebox.showinfo(APP_NAME,"Conta conectada. Agora envie os dados locais para a nuvem.",parent=self.parent)
+
+    def sign_up(self):
+        credentials=self.credentials()
+        if not credentials:return
+        try:signed_in=self.parent.cloud.sign_up(*credentials);self.parent.save_settings()
+        except CloudSyncError as error:messagebox.showerror(APP_NAME,str(error),parent=self);return
+        if signed_in:
+            self.destroy();self.parent.update_cloud_status();messagebox.showinfo(APP_NAME,"Conta criada e conectada.",parent=self.parent)
+        else:
+            messagebox.showinfo(APP_NAME,"Conta criada. Confirme o e-mail recebido e depois use o botão Entrar.",parent=self)
+
+
 class EstoqueApp(ctk.CTk):
     def __init__(self):
         super().__init__(fg_color=COLORS["background"])
         self.withdraw()
         dpi = float(self.winfo_fpixels("1i")); self.ui_scale = max(1, min(dpi/96, 3)); self.tk.call("tk", "scaling", dpi/72)
         self.settings_path = data_dir()/"settings.json"; self.settings = self.load_settings(); ctk.set_appearance_mode(self.settings.get("theme", "Light"))
-        self.db = Database(); self.title(f"{APP_NAME} — v{APP_VERSION}")
+        self.db = Database(); self.cloud = CloudSync(data_dir(), self.settings); self.title(f"{APP_NAME} — v{APP_VERSION}")
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight(); self.work_areas = monitor_work_areas(sw, sh)
         primary = self.work_areas[0]; work_width, work_height = primary[2]-primary[0], primary[3]-primary[1]
         self.minimum_width = min(work_width, round(1050*self.ui_scale)); self.minimum_height = min(work_height, round(680*self.ui_scale))
@@ -1037,7 +1082,7 @@ class EstoqueApp(ctk.CTk):
         for key, label in (("stock","Estoque atual"),("movements","Movimentações"),("count","Contagem"),("registration","Cadastro"),("settings","Configurações")):
             button = ctk.CTkButton(self.sidebar, text=label, image=self.icons[key], compound="left", anchor="w", height=48, corner_radius=10, fg_color="transparent", hover_color=COLORS["surface_hover"], text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 13, "bold"), command=lambda k=key:self.show_page(k))
             button.pack(fill="x", padx=16, pady=4); self.nav_buttons[key]=button
-        ctk.CTkLabel(self.sidebar, text=f"●  Dados locais protegidos\n    Versão {APP_VERSION}", justify="left", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10)).pack(side="bottom", anchor="w", padx=26, pady=28)
+        self.sidebar_status=ctk.CTkLabel(self.sidebar, text=f"●  Local + nuvem segura\n    Versão {APP_VERSION}", justify="left", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10));self.sidebar_status.pack(side="bottom", anchor="w", padx=26, pady=28)
         self.content = ctk.CTkFrame(self, fg_color=COLORS["background"], corner_radius=0); self.content.grid(row=0,column=1,sticky="nsew"); self.content.grid_columnconfigure(0,weight=1); self.content.grid_rowconfigure(0,weight=1)
 
     def show_page(self,key):
@@ -1445,10 +1490,42 @@ class EstoqueApp(ctk.CTk):
     def settings_page(self):
         page=ctk.CTkFrame(self.content,fg_color="transparent");PageTitle(page,"Configurações","Personalize a aparência e proteja seus dados.").pack(fill="x",pady=(0,22))
         appearance=Card(page);appearance.pack(fill="x",pady=(0,16));row=ctk.CTkFrame(appearance,fg_color="transparent");row.pack(fill="x",padx=22,pady=20);ctk.CTkLabel(row,text="Tema da interface",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w");ctk.CTkLabel(row,text="Escolha entre o modo claro off-white e o modo escuro em grafite.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(4,12));self.theme_selector=ctk.CTkSegmentedButton(row,values=["Light","Dark"],command=self.change_theme,selected_color=COLORS["accent"],selected_hover_color=COLORS["accent_hover"]);self.theme_selector.pack(anchor="w");self.theme_selector.set(self.settings.get("theme","Light"))
+        cloud=Card(page);cloud.pack(fill="x",pady=(0,16));cloud_row=ctk.CTkFrame(cloud,fg_color="transparent");cloud_row.pack(fill="x",padx=22,pady=20)
+        cloud_text=ctk.CTkFrame(cloud_row,fg_color="transparent");cloud_text.pack(side="left",fill="x",expand=True)
+        ctk.CTkLabel(cloud_text,text="Supabase — cópia na nuvem",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w")
+        self.cloud_status=tk.StringVar();ctk.CTkLabel(cloud_text,textvariable=self.cloud_status,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(4,0));self.update_cloud_status()
+        cloud_actions=ctk.CTkFrame(cloud_row,fg_color="transparent");cloud_actions.pack(side="right")
+        ctk.CTkButton(cloud_actions,text="Conta",width=90,height=38,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.cloud_account).pack(side="left",padx=4)
+        ctk.CTkButton(cloud_actions,text="Enviar dados",width=115,height=38,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.cloud_upload).pack(side="left",padx=4)
+        ctk.CTkButton(cloud_actions,text="Baixar dados",width=115,height=38,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.cloud_download).pack(side="left",padx=4)
         actions=ctk.CTkFrame(page,fg_color="transparent");actions.pack(fill="both",expand=True);actions.grid_columnconfigure((0,1),weight=1)
         for index,(title,text,icon_name,command,button) in enumerate((("Atualizações",f"Versão instalada: {APP_VERSION}.","refresh",self.check_updates,"Buscar atualização"),("Backup dos dados","Salve uma cópia segura do banco local.","download",self.backup,"Baixar backup"),("Restaurar backup","Substitua os dados por um backup anterior.","upload",self.restore,"Restaurar backup"))):
             card=Card(actions);card.grid(row=index//2,column=index%2,sticky="nsew",padx=(0 if index%2==0 else 8,8 if index%2==0 else 0),pady=8);ctk.CTkLabel(card,text=title,image=self.icons[icon_name],compound="left",text_color=COLORS["text"],font=ctk.CTkFont("Inter",14,"bold")).pack(anchor="w",padx=20,pady=(20,5));ctk.CTkLabel(card,text=text,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(anchor="w",padx=20);ctk.CTkButton(card,text=button,height=38,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=command).pack(anchor="w",padx=20,pady=20)
         return page
+
+    def update_cloud_status(self):
+        if hasattr(self,"cloud_status"):
+            self.cloud_status.set(f"Conectado como {self.cloud.email}" if self.cloud.signed_in else "Desconectado — entre ou crie sua conta segura")
+
+    def cloud_account(self):
+        if self.cloud.signed_in:
+            if messagebox.askyesno(APP_NAME,f"Sair da conta {self.cloud.email}?",parent=self):
+                self.cloud.sign_out();self.save_settings();self.update_cloud_status()
+        else:CloudLoginDialog(self)
+
+    def cloud_upload(self):
+        if not self.cloud.signed_in:CloudLoginDialog(self);return
+        if not messagebox.askyesno(APP_NAME,"Enviar agora os produtos, movimentações, cadastros e fotos para sua conta privada no Supabase?",parent=self):return
+        try:self.cloud.upload(self.db.db)
+        except CloudSyncError as error:messagebox.showerror(APP_NAME,str(error),parent=self);return
+        messagebox.showinfo(APP_NAME,"Dados enviados e protegidos no Supabase.",parent=self)
+
+    def cloud_download(self):
+        if not self.cloud.signed_in:CloudLoginDialog(self);return
+        if not messagebox.askyesno(APP_NAME,"Baixar a cópia do Supabase e substituir os dados locais?\n\nUm backup local de segurança será criado automaticamente.",icon="warning",parent=self):return
+        try:updated_at=self.cloud.download(self.db.db)
+        except (CloudSyncError,KeyError,ValueError,sqlite3.Error,OSError) as error:messagebox.showerror(APP_NAME,f"Não foi possível baixar os dados.\n\n{error}",parent=self);return
+        self.refresh_all();messagebox.showinfo(APP_NAME,f"Dados restaurados da nuvem.\nCópia remota: {updated_at[:19].replace('T',' ')}",parent=self)
 
     def change_theme(self,value):
         self.settings["theme"]=value;self.save_settings();ctk.set_appearance_mode(value);self.configure_tables()

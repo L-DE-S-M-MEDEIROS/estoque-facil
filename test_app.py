@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 import app
+from cloud_sync import CloudSync
 from premium_widgets import count_age_color
 
 
@@ -101,6 +102,19 @@ class InventoryDatabaseTests(unittest.TestCase):
         batch_id = self.db.add_movement_batch("saida", [(product_id, 3)], date.today().isoformat(), "Venda", "Teste")
         self.assertGreater(batch_id, 0)
         self.assertEqual(self.db.stock(product_id), 7)
+
+    def test_cloud_payload_contains_inventory_and_photo(self):
+        photo = app.data_dir() / "fotos" / "produto.png"
+        photo.write_bytes(b"imagem")
+        product_id = self.create_product()
+        product = dict(self.db.product(product_id))
+        product["photo"] = str(photo)
+        self.db.save_product(product, product_id)
+        sync = CloudSync(app.data_dir(), {})
+        payload = sync.export_payload(self.db.db)
+        self.assertEqual(payload["format"], 1)
+        self.assertEqual(payload["tables"]["products"][0]["photo"], "produto.png")
+        self.assertIn("produto.png", payload["photos"])
 
 
 if __name__ == "__main__":

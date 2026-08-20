@@ -2,6 +2,15 @@
 
 Aplicativo desktop nativo para Windows, desenvolvido em Python com Tkinter e SQLite.
 
+## Sincronização com Supabase
+
+Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** para criar ou entrar em uma conta, enviar os dados locais e restaurar a cópia remota. Produtos, movimentações, cadastros e fotos são enviados ao projeto separado `Estoque Bolsas Baby`.
+
+- O aplicativo continua funcionando localmente sem internet.
+- Cada conta acessa somente a própria cópia por meio de Row Level Security (RLS).
+- A senha não é armazenada; somente a sessão de acesso fica salva neste computador.
+- Antes de baixar e substituir os dados locais, o aplicativo cria um backup automático.
+
 ## Recursos
 
 - Cadastro de produtos sem SKU ou código de barras
