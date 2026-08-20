@@ -23,7 +23,7 @@ from premium_widgets import MaskedDateEntry, TreeConfidenceOverlay, TreeRelative
 from cloud_sync import CloudSync, CloudSyncError
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -1292,7 +1292,7 @@ class EstoqueApp(ctk.CTk):
         self.m_quantity = tk.StringVar()
         self.m_reason = tk.StringVar()
         self.m_user = tk.StringVar()
-        self.product_suggestions_collapsed = False
+        self.product_suggestions_collapsed = True
 
         composer = Card(page)
         composer.pack(fill="x", pady=(0, 16))
@@ -1325,15 +1325,15 @@ class EstoqueApp(ctk.CTk):
         ctk.CTkLabel(item_header, text="Produtos do conjunto", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 15, "bold")).pack(side="left")
         self.current_stock = ctk.CTkLabel(item_header, text="Saldo atual: —", text_color=COLORS["accent"], font=ctk.CTkFont("Inter", 10, "bold"))
         self.current_stock.pack(side="right")
-        self.product_suggestions_toggle = ctk.CTkButton(item_header, text="", image=self.icons["collapse"], width=32, height=30, corner_radius=8, fg_color=COLORS["surface_alt"], hover_color=COLORS["surface_hover"], command=self.toggle_product_suggestions)
-        self.product_suggestions_toggle.pack(side="right", padx=(0, 10))
         add_row = ctk.CTkFrame(items, fg_color="transparent")
         add_row.pack(fill="x", pady=(0, 10)); add_row.grid_columnconfigure(0, weight=1)
-        self.m_product_search=ctk.CTkFrame(add_row,height=40,corner_radius=9,fg_color=COLORS["surface"],border_width=2,border_color=COLORS["accent"])
+        self.m_product_search=ctk.CTkFrame(add_row,height=42,corner_radius=9,fg_color=COLORS["surface"],border_width=2,border_color=COLORS["accent"])
         self.m_product_search.grid(row=0,column=0,sticky="ew",padx=(0,8));self.m_product_search.grid_columnconfigure(1,weight=1);self.m_product_search.grid_propagate(False)
-        ctk.CTkLabel(self.m_product_search,text="",image=self.icons["search"],width=34).grid(row=0,column=0,sticky="ns",padx=(5,0))
+        ctk.CTkLabel(self.m_product_search,text="",image=self.icons["search"],width=42).grid(row=0,column=0,sticky="nsew",padx=(9,2),pady=4)
         self.m_product_entry=ctk.CTkEntry(self.m_product_search,textvariable=self.m_product,placeholder_text="Buscar produto, grupo ou variação...",height=34,corner_radius=0,border_width=0,fg_color="transparent")
-        self.m_product_entry.grid(row=0,column=1,sticky="nsew",padx=(0,6),pady=2);self.m_product_entry.bind("<FocusIn>",lambda _event:self.show_product_suggestions());self.m_product_entry.bind("<KeyRelease>",self.on_product_search);self.m_product_entry.bind("<Return>",lambda _event:self.select_first_product_suggestion())
+        self.m_product_entry.grid(row=0,column=1,sticky="nsew",padx=(0,2),pady=3);self.m_product_entry.bind("<FocusIn>",lambda _event:self.show_product_suggestions(force=True));self.m_product_entry.bind("<KeyRelease>",self.on_product_search);self.m_product_entry.bind("<Return>",lambda _event:self.select_first_product_suggestion())
+        self.product_suggestions_toggle = ctk.CTkButton(self.m_product_search, text="", image=self.icons["expand"], width=36, height=32, corner_radius=7, fg_color=COLORS["surface_alt"], hover_color=COLORS["surface_hover"], command=self.toggle_product_suggestions)
+        self.product_suggestions_toggle.grid(row=0,column=2,sticky="e",padx=(2,5),pady=4)
         self.m_quantity_entry = ctk.CTkEntry(add_row, textvariable=self.m_quantity, placeholder_text="Quantidade", width=120, height=38, corner_radius=9, border_color=COLORS["border"], fg_color=COLORS["surface"])
         self.m_quantity_entry.grid(row=0, column=1, padx=(0, 8))
         self.m_add_button = ctk.CTkButton(add_row, text="Adicionar", width=105, height=38, corner_radius=9, fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], command=self.add_draft_item)
@@ -1370,14 +1370,18 @@ class EstoqueApp(ctk.CTk):
     def movement_product_results(self,query=""):
         return [product for product in self.db.products() if product_matches_search(product,query)]
     def hide_product_suggestions(self):
-        if hasattr(self,"product_suggestions"):self.product_suggestions.pack_forget()
+        if hasattr(self,"product_suggestions"):
+            self.product_suggestions.pack_forget();self.product_suggestions_collapsed=True
+            self.product_suggestions_toggle.configure(image=self.icons["expand"])
     def toggle_product_suggestions(self):
         self.product_suggestions_collapsed=not self.product_suggestions_collapsed
         self.product_suggestions_toggle.configure(image=self.icons["expand" if self.product_suggestions_collapsed else "collapse"])
         if self.product_suggestions_collapsed:self.hide_product_suggestions()
         else:self.show_product_suggestions();self.m_product_entry.focus_set()
-    def show_product_suggestions(self):
+    def show_product_suggestions(self, force=False):
         if not hasattr(self,"product_suggestions"):return
+        if force:
+            self.product_suggestions_collapsed=False;self.product_suggestions_toggle.configure(image=self.icons["collapse"])
         if self.product_suggestions_collapsed:
             self.hide_product_suggestions();return
         for child in self.product_suggestions.winfo_children():child.destroy()
@@ -1395,7 +1399,7 @@ class EstoqueApp(ctk.CTk):
             return
         selected=self.db.product(self.m_selected_product_id) if self.m_selected_product_id else None
         if not selected or self.m_product.get()!=self.movement_product_display(selected):self.m_selected_product_id=None;self.update_current_stock()
-        self.show_product_suggestions()
+        self.show_product_suggestions(force=True)
     def select_first_product_suggestion(self):
         results=self.movement_product_results(self.m_product.get())
         if results:self.select_movement_product(int(results[0]["id"]));self.m_quantity_entry.focus_set()

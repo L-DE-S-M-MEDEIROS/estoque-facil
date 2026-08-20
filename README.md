@@ -12,6 +12,7 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Antes de baixar e substituir os dados locais, o aplicativo cria um backup automático.
 - A aba **Movimentações** possui rolagem vertical e permite recolher ou expandir a lista pesquisável de produtos.
 - A tabela **Posição do estoque** possui barra de rolagem própria para suportar catálogos maiores.
+- O botão de recolher produtos fica integrado à busca, com ícone de pesquisa ajustado para melhor legibilidade.
 
 ## Recursos
 
