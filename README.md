@@ -10,6 +10,8 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Cada conta acessa somente a própria cópia por meio de Row Level Security (RLS).
 - A senha não é armazenada; somente a sessão de acesso fica salva neste computador.
 - Antes de baixar e substituir os dados locais, o aplicativo cria um backup automático.
+- A aba **Movimentações** possui rolagem vertical e permite recolher ou expandir a lista pesquisável de produtos.
+- A tabela **Posição do estoque** possui barra de rolagem própria para suportar catálogos maiores.
 
 ## Recursos
 

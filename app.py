@@ -23,7 +23,7 @@ from premium_widgets import MaskedDateEntry, TreeConfidenceOverlay, TreeRelative
 from cloud_sync import CloudSync, CloudSyncError
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -1039,7 +1039,7 @@ class EstoqueApp(ctk.CTk):
         self._last_window_state = self.settings.get("window_state", "zoomed") if self.settings.get("window_state") in ("normal", "zoomed") else "zoomed"
         self.iconphoto(True, ImageTk.PhotoImage(app_icon(256))); self.protocol("WM_DELETE_WINDOW", self.close)
         self.brand_icon = brand_mark(86)
-        self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "count", "settings", "registration", "user", "operation", "group", "plus", "search", "edit", "trash", "download", "upload", "refresh")}
+        self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "count", "settings", "registration", "user", "operation", "group", "plus", "search", "edit", "trash", "download", "upload", "refresh", "collapse", "expand")}
         self.table_separators: list[TreeRowSeparatorOverlay] = []
         self.nav_buttons = {}; self.pages = {}; self.build_shell(); self.show_page("stock")
         self.bind("<Configure>", self.remember_window_geometry)
@@ -1188,7 +1188,10 @@ class EstoqueApp(ctk.CTk):
         for title in ("Produtos","Unidades em estoque","Abaixo do mínimo","Confiança baixa"):
             card=Card(cards,height=108);card.pack(side="left",fill="both",expand=True,padx=(0,12));card.pack_propagate(False);ctk.CTkLabel(card,text=title,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=18,pady=(17,3));label=ctk.CTkLabel(card,text="0",text_color=COLORS["text"],font=ctk.CTkFont("Inter",22,"bold"));label.pack(anchor="w",padx=18);self.stock_cards.append(label)
         card=Card(page);card.pack(fill="both",expand=True);bar=ctk.CTkFrame(card,fg_color="transparent");bar.pack(fill="x",padx=20,pady=(18,8));ctk.CTkLabel(bar,text="Posição do estoque",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(side="left");self.stock_search=ctk.CTkEntry(bar,placeholder_text="Filtrar produto ou grupo...",width=300,height=38,corner_radius=9);self.stock_search.pack(side="right");self.stock_search.bind("<KeyRelease>",lambda e:self.refresh_stock())
-        self.stock_tree=self.table(card,("group","name","stock","confidence"),("Grupo / modelo","Produto","Saldo atual","Confiança"),(220,320,140,140));self.stock_tree.pack(fill="both",expand=True,padx=20,pady=(8,20));self.stock_confidence_cells=TreeConfidenceOverlay(self.stock_tree,COLORS);self.stock_quantity_cells=TreeStockOverlay(self.stock_tree,COLORS);self.configure_tables();return page
+        stock_table=ctk.CTkFrame(card,fg_color="transparent");stock_table.pack(fill="both",expand=True,padx=20,pady=(8,20));stock_table.grid_columnconfigure(0,weight=1);stock_table.grid_rowconfigure(0,weight=1)
+        self.stock_tree=self.table(stock_table,("group","name","stock","confidence"),("Grupo / modelo","Produto","Saldo atual","Confiança"),(220,320,140,140));self.stock_tree.grid(row=0,column=0,sticky="nsew")
+        self.stock_scrollbar=ctk.CTkScrollbar(stock_table,orientation="vertical",command=self.stock_tree.yview,button_color=COLORS["accent"],button_hover_color=COLORS["accent_hover"]);self.stock_scrollbar.grid(row=0,column=1,sticky="ns",padx=(8,0));self.stock_tree.configure(yscrollcommand=self.stock_scrollbar.set)
+        self.stock_confidence_cells=TreeConfidenceOverlay(self.stock_tree,COLORS);self.stock_quantity_cells=TreeStockOverlay(self.stock_tree,COLORS);self.configure_tables();return page
 
     def refresh_stock(self):
         if not hasattr(self,"stock_tree"):return
@@ -1279,7 +1282,7 @@ class EstoqueApp(ctk.CTk):
         for label,text in zip(self.count_cards,(str(pending),str(counted_today),str(differences_today),f"{average}%")):label.configure(text=text)
 
     def movements_page(self):
-        page = ctk.CTkFrame(self.content, fg_color="transparent")
+        page = ctk.CTkScrollableFrame(self.content, fg_color="transparent", corner_radius=0, scrollbar_button_color=COLORS["accent"], scrollbar_button_hover_color=COLORS["accent_hover"])
         PageTitle(page, "Movimentações", "Monte um conjunto de produtos, revise e registre tudo de uma vez.").pack(fill="x", pady=(0, 18))
         self.movement_draft: list[dict] = []
         self.draft_edit_index: int | None = None
@@ -1289,6 +1292,7 @@ class EstoqueApp(ctk.CTk):
         self.m_quantity = tk.StringVar()
         self.m_reason = tk.StringVar()
         self.m_user = tk.StringVar()
+        self.product_suggestions_collapsed = False
 
         composer = Card(page)
         composer.pack(fill="x", pady=(0, 16))
@@ -1321,6 +1325,8 @@ class EstoqueApp(ctk.CTk):
         ctk.CTkLabel(item_header, text="Produtos do conjunto", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 15, "bold")).pack(side="left")
         self.current_stock = ctk.CTkLabel(item_header, text="Saldo atual: —", text_color=COLORS["accent"], font=ctk.CTkFont("Inter", 10, "bold"))
         self.current_stock.pack(side="right")
+        self.product_suggestions_toggle = ctk.CTkButton(item_header, text="", image=self.icons["collapse"], width=32, height=30, corner_radius=8, fg_color=COLORS["surface_alt"], hover_color=COLORS["surface_hover"], command=self.toggle_product_suggestions)
+        self.product_suggestions_toggle.pack(side="right", padx=(0, 10))
         add_row = ctk.CTkFrame(items, fg_color="transparent")
         add_row.pack(fill="x", pady=(0, 10)); add_row.grid_columnconfigure(0, weight=1)
         self.m_product_search=ctk.CTkFrame(add_row,height=40,corner_radius=9,fg_color=COLORS["surface"],border_width=2,border_color=COLORS["accent"])
@@ -1332,7 +1338,7 @@ class EstoqueApp(ctk.CTk):
         self.m_quantity_entry.grid(row=0, column=1, padx=(0, 8))
         self.m_add_button = ctk.CTkButton(add_row, text="Adicionar", width=105, height=38, corner_radius=9, fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], command=self.add_draft_item)
         self.m_add_button.grid(row=0, column=2)
-        self.product_suggestions=ctk.CTkFrame(items,corner_radius=9,fg_color=COLORS["surface_alt"],border_width=1,border_color=COLORS["border"])
+        self.product_suggestions=ctk.CTkScrollableFrame(items,height=160,corner_radius=9,fg_color=COLORS["surface_alt"],border_width=1,border_color=COLORS["border"],scrollbar_button_color=COLORS["accent"],scrollbar_button_hover_color=COLORS["accent_hover"])
         self.draft_tree = self.table(items, ("product", "quantity"), ("Produto", "Quantidade"), (360, 120))
         self.draft_tree.configure(height=4)
         self.draft_tree.pack(fill="x")
@@ -1365,10 +1371,17 @@ class EstoqueApp(ctk.CTk):
         return [product for product in self.db.products() if product_matches_search(product,query)]
     def hide_product_suggestions(self):
         if hasattr(self,"product_suggestions"):self.product_suggestions.pack_forget()
+    def toggle_product_suggestions(self):
+        self.product_suggestions_collapsed=not self.product_suggestions_collapsed
+        self.product_suggestions_toggle.configure(image=self.icons["expand" if self.product_suggestions_collapsed else "collapse"])
+        if self.product_suggestions_collapsed:self.hide_product_suggestions()
+        else:self.show_product_suggestions();self.m_product_entry.focus_set()
     def show_product_suggestions(self):
         if not hasattr(self,"product_suggestions"):return
+        if self.product_suggestions_collapsed:
+            self.hide_product_suggestions();return
         for child in self.product_suggestions.winfo_children():child.destroy()
-        results=self.movement_product_results(self.m_product.get())[:7]
+        results=self.movement_product_results(self.m_product.get())
         if not results:
             ctk.CTkLabel(self.product_suggestions,text="Nenhum produto encontrado",height=36,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(fill="x",padx=10,pady=4)
         else:
