@@ -57,14 +57,15 @@ class CalendarPopup(ctk.CTkToplevel):
 class MaskedDateEntry(ctk.CTkFrame):
     """Date input that always preserves the dd/mm/yy separators."""
     def __init__(self, master, colors: dict, initial: date | None = None, **kwargs):
+        control_height = kwargs.pop("control_height", 40)
         super().__init__(master, fg_color="transparent", **kwargs)
         self.colors = colors
         self.digits = list((initial or date.today()).strftime("%d%m%y"))
         self.variable = tk.StringVar()
-        self.entry = ctk.CTkEntry(self, textvariable=self.variable, height=40, corner_radius=9, border_color=colors["border"], fg_color=colors["surface"], font=ctk.CTkFont("Inter", 12))
+        self.entry = ctk.CTkEntry(self, textvariable=self.variable, height=control_height, corner_radius=9, border_color=colors["border"], fg_color=colors["surface"], font=ctk.CTkFont("Inter", 12))
         self.entry.pack(side="left", fill="x", expand=True)
         self.calendar_icon = icon("calendar", 19)
-        ctk.CTkButton(self, text="", image=self.calendar_icon, width=42, height=40, corner_radius=9, fg_color=colors["surface_alt"], hover_color=colors["surface_hover"], command=self.open_calendar).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(self, text="", image=self.calendar_icon, width=control_height + 2, height=control_height, corner_radius=9, fg_color=colors["surface_alt"], hover_color=colors["surface_hover"], command=self.open_calendar).pack(side="left", padx=(8, 0))
         self.entry.bind("<KeyPress>", self.keypress)
         self.entry.bind("<Button-1>", lambda _e: self.after(1, self.snap_cursor))
         self.refresh(0)

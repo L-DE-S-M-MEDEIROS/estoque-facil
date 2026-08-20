@@ -59,6 +59,12 @@ def _draw_icon(name: str, color: str, size: int = 256) -> Image.Image:
         draw.line((p(16), p(5), p(19), p(8), p(16), p(11)), **line)
         draw.line((p(20), p(16), p(5), p(16)), **line)
         draw.line((p(8), p(13), p(5), p(16), p(8), p(19)), **line)
+    elif name == "count":
+        draw.rounded_rectangle((p(5), p(4), p(20), p(22)), radius=p(2), outline=color, width=width)
+        draw.rounded_rectangle((p(9), p(2), p(16), p(7)), radius=p(1.5), outline=color, width=width)
+        for y in (10, 15, 20):
+            draw.line((p(8), p(y), p(10), p(y + 2), p(13), p(y - 2)), **line)
+            draw.line((p(15), p(y), p(18), p(y)), **line)
     elif name == "settings":
         draw.ellipse((p(7), p(7), p(17), p(17)), outline=color, width=width)
         draw.ellipse((p(10), p(10), p(14), p(14)), fill=color)

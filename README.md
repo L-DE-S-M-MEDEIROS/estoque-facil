@@ -6,9 +6,12 @@ Aplicativo desktop nativo para Windows, desenvolvido em Python com Tkinter e SQL
 
 - Cadastro de produtos sem SKU ou código de barras
 - Organização por Categoria, Grupo/modelo e Variação, mantendo estoque independente
-- Foto opcional, categoria, unidade, custo e estoque mínimo
-- Aba **Estoque atual** com saldo, situação e valor estimado
+- Foto opcional, categoria, unidade e estoque mínimo
+- Aba **Estoque atual** com saldo, situação, confiança e última contagem
+- Aba **Contagem** no formato de check-in da planilha, com quantidade física, data e responsável
+- Índice de confiança calculado pelos dias, frequência e volume movimentado desde a última contagem
 - Entradas, saídas, ajustes e inventário com data editável
+- Edição e exclusão de movimentações com recálculo seguro dos saldos
 - Campo de data mascarado em `dd/mm/aa` e calendário para seleção com o mouse
 - Histórico completo de movimentações
 - Backup e restauração do banco SQLite
