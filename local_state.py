@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+
+UI_DEFAULTS: dict[str, Any] = {
+    "theme": "Light",
+    "window_state": "zoomed",
+    "window_geometry": "",
+    "last_page": "stock",
+    "counter_name": "",
+    "stock_search": "",
+    "count_search": "",
+    "count_filter": "todos",
+    "movement_products_expanded": False,
+    "movement_operation": "Entrada",
+    "movement_user": "",
+    "history_filter": "Todas as operações",
+}
+
+CLOUD_SESSION_KEYS = frozenset(
+    {
+        "cloud_access_token",
+        "cloud_refresh_token",
+        "cloud_user_id",
+        "cloud_email",
+        "cloud_device_id",
+    }
+)
+
+
+def read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _text(value: Any, fallback: str = "", maximum: int = 240) -> str:
+    return str(value if value is not None else fallback)[:maximum]
+
+
+def sanitize_preferences(values: dict[str, Any]) -> dict[str, Any]:
+    clean = dict(UI_DEFAULTS)
+    clean["theme"] = values.get("theme") if values.get("theme") in ("Light", "Dark") else "Light"
+    clean["window_state"] = values.get("window_state") if values.get("window_state") in ("normal", "zoomed") else "zoomed"
+    clean["window_geometry"] = _text(values.get("window_geometry"), maximum=80)
+    clean["last_page"] = values.get("last_page") if values.get("last_page") in ("stock", "movements", "count", "registration", "settings") else "stock"
+    clean["counter_name"] = _text(values.get("counter_name"), maximum=100)
+    clean["stock_search"] = _text(values.get("stock_search"))
+    clean["count_search"] = _text(values.get("count_search"))
+    clean["count_filter"] = values.get("count_filter") if values.get("count_filter") in ("todos", "pendentes", "verificados") else "todos"
+    clean["movement_products_expanded"] = values.get("movement_products_expanded") is True
+    clean["movement_operation"] = _text(values.get("movement_operation"), "Entrada", 100) or "Entrada"
+    clean["movement_user"] = _text(values.get("movement_user"), maximum=100)
+    clean["history_filter"] = _text(values.get("history_filter"), "Todas as operações", 100) or "Todas as operações"
+    return clean
+
+
+class LocalPreferences:
+    """Persist only device-local UI state for the current operating-system user."""
+
+    def __init__(self, path: Path, legacy: dict[str, Any] | None = None):
+        self.path = path
+        stored = read_json_object(path)
+        if isinstance(stored.get("preferences"), dict):
+            stored = stored["preferences"]
+        source = stored if path.exists() else (legacy or {})
+        self.values = sanitize_preferences(source)
+        self.save()
+
+    def save(self) -> None:
+        clean = sanitize_preferences(self.values)
+        self.values.clear()
+        self.values.update(clean)
+        atomic_write_json(self.path, {"format": 1, "preferences": self.values})
+
+
+class LocalCloudSession:
+    """Persist Supabase authentication locally without accepting UI preferences."""
+
+    def __init__(self, path: Path, legacy: dict[str, Any] | None = None):
+        self.path = path
+        stored = read_json_object(path)
+        if isinstance(stored.get("session"), dict):
+            stored = stored["session"]
+        source = stored if path.exists() else (legacy or {})
+        self.values = {key: source[key] for key in CLOUD_SESSION_KEYS if key in source}
+        self.save()
+
+    def save(self) -> None:
+        clean = {key: self.values[key] for key in CLOUD_SESSION_KEYS if key in self.values}
+        self.values.clear()
+        self.values.update(clean)
+        atomic_write_json(self.path, {"format": 1, "session": self.values})

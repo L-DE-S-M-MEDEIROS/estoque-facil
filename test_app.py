@@ -7,6 +7,7 @@ import unittest
 
 import app
 from cloud_sync import CloudSync
+from local_state import LocalCloudSession, LocalPreferences, read_json_object
 from premium_widgets import count_age_color, stock_quantity_color
 
 
@@ -130,8 +131,62 @@ class InventoryDatabaseTests(unittest.TestCase):
         sync = CloudSync(app.data_dir(), {})
         payload = sync.export_payload(self.db.db)
         self.assertEqual(payload["format"], 1)
+        self.assertEqual(set(payload), {"format", "app", "exported_at", "tables", "photos"})
         self.assertEqual(payload["tables"]["products"][0]["photo"], "produto.png")
         self.assertIn("produto.png", payload["photos"])
+
+
+class LocalStateTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.folder = Path(self.temporary_directory.name)
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def test_legacy_settings_are_split_without_sending_ui_preferences_to_cloud_session(self):
+        legacy = {
+            "theme": "Dark",
+            "last_page": "movements",
+            "stock_search": "bolsa azul",
+            "cloud_access_token": "secret-token",
+            "cloud_user_id": "user-123",
+        }
+        preferences = LocalPreferences(self.folder / "ui-preferences.json", legacy)
+        session = LocalCloudSession(self.folder / "cloud-session.json", legacy)
+
+        self.assertEqual(preferences.values["theme"], "Dark")
+        self.assertEqual(preferences.values["last_page"], "movements")
+        self.assertNotIn("cloud_access_token", read_json_object(preferences.path)["preferences"])
+        self.assertEqual(session.values["cloud_access_token"], "secret-token")
+        self.assertNotIn("theme", read_json_object(session.path)["session"])
+
+    def test_local_preferences_survive_restart_and_invalid_values_use_safe_defaults(self):
+        path = self.folder / "ui-preferences.json"
+        preferences = LocalPreferences(path)
+        preferences.values.update({"theme": "Dark", "count_filter": "pendentes", "last_page": "count"})
+        preferences.save()
+
+        restored = LocalPreferences(path)
+        self.assertEqual(restored.values["theme"], "Dark")
+        self.assertEqual(restored.values["count_filter"], "pendentes")
+        self.assertEqual(restored.values["last_page"], "count")
+
+        restored.values.update({"theme": "Inválido", "count_filter": "qualquer", "last_page": "desconhecida"})
+        restored.save()
+        self.assertEqual(restored.values["theme"], "Light")
+        self.assertEqual(restored.values["count_filter"], "todos")
+        self.assertEqual(restored.values["last_page"], "stock")
+
+    def test_signed_out_cloud_session_is_not_reimported_from_legacy_settings(self):
+        path = self.folder / "cloud-session.json"
+        legacy = {"cloud_access_token": "old-token", "cloud_user_id": "old-user"}
+        session = LocalCloudSession(path, legacy)
+        session.values.clear()
+        session.save()
+
+        restored = LocalCloudSession(path, legacy)
+        self.assertEqual(restored.values, {})
 
 
 if __name__ == "__main__":

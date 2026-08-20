@@ -43,6 +43,7 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Consulta de atualizações pelo GitHub
 - Interface adaptável a Full HD, 2K e 4K, respeitando a escala de DPI do Windows
 - Temas Light off-white e Dark grafite com azul neon
+- Preferências da interface salvas localmente por usuário do Windows, separadas da sessão e dos dados sincronizados pelo Supabase
 - Componentes arredondados, espaçamento amplo e hierarquia tipográfica moderna
 - Ícones próprios em alta resolução com redução antialiasada
 - Navegação priorizando Estoque atual, Movimentações e Produtos

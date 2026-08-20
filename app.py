@@ -21,9 +21,10 @@ from PIL import ImageTk
 from premium_icons import app_icon, brand_mark, icon
 from premium_widgets import MaskedDateEntry, TreeConfidenceOverlay, TreeRelativeDateOverlay, TreeRowSeparatorOverlay, TreeStockOverlay, confidence_tier
 from cloud_sync import CloudSync, CloudSyncError
+from local_state import LocalCloudSession, LocalPreferences, read_json_object
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -1013,14 +1014,14 @@ class CloudLoginDialog(ctk.CTkToplevel):
     def sign_in(self):
         credentials=self.credentials()
         if not credentials:return
-        try:self.parent.cloud.sign_in(*credentials);self.parent.save_settings()
+        try:self.parent.cloud.sign_in(*credentials);self.parent.save_cloud_settings()
         except CloudSyncError as error:messagebox.showerror(APP_NAME,str(error),parent=self);return
         self.destroy();self.parent.update_cloud_status();messagebox.showinfo(APP_NAME,"Conta conectada. Agora envie os dados locais para a nuvem.",parent=self.parent)
 
     def sign_up(self):
         credentials=self.credentials()
         if not credentials:return
-        try:signed_in=self.parent.cloud.sign_up(*credentials);self.parent.save_settings()
+        try:signed_in=self.parent.cloud.sign_up(*credentials);self.parent.save_cloud_settings()
         except CloudSyncError as error:messagebox.showerror(APP_NAME,str(error),parent=self);return
         if signed_in:
             self.destroy();self.parent.update_cloud_status();messagebox.showinfo(APP_NAME,"Conta criada e conectada.",parent=self.parent)
@@ -1033,8 +1034,13 @@ class EstoqueApp(ctk.CTk):
         super().__init__(fg_color=COLORS["background"])
         self.withdraw()
         dpi = float(self.winfo_fpixels("1i")); self.ui_scale = max(1, min(dpi/96, 3)); self.tk.call("tk", "scaling", dpi/72)
-        self.settings_path = data_dir()/"settings.json"; self.settings = self.load_settings(); ctk.set_appearance_mode(self.settings.get("theme", "Light"))
-        self.db = Database(); self.cloud = CloudSync(data_dir(), self.settings); self.title(f"{APP_NAME} — v{APP_VERSION}")
+        legacy_settings = read_json_object(data_dir()/"settings.json")
+        self.preferences_store = LocalPreferences(data_dir()/"ui-preferences.json", legacy_settings)
+        self.cloud_session_store = LocalCloudSession(data_dir()/"cloud-session.json", legacy_settings)
+        self.settings = self.preferences_store.values
+        self.cloud_settings = self.cloud_session_store.values
+        ctk.set_appearance_mode(self.settings.get("theme", "Light"))
+        self.db = Database(); self.cloud = CloudSync(data_dir(), self.cloud_settings); self.save_cloud_settings(); self.title(f"{APP_NAME} — v{APP_VERSION}")
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight(); self.work_areas = monitor_work_areas(sw, sh)
         primary = self.work_areas[0]; work_width, work_height = primary[2]-primary[0], primary[3]-primary[1]
         self.minimum_width = min(work_width, round(1050*self.ui_scale)); self.minimum_height = min(work_height, round(680*self.ui_scale))
@@ -1046,15 +1052,25 @@ class EstoqueApp(ctk.CTk):
         self.brand_icon = brand_mark(86)
         self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "count", "settings", "registration", "user", "operation", "group", "plus", "search", "edit", "trash", "download", "upload", "refresh", "collapse", "expand")}
         self.table_separators: list[TreeRowSeparatorOverlay] = []
-        self.nav_buttons = {}; self.pages = {}; self.build_shell(); self.show_page("stock")
+        self.nav_buttons = {}; self.pages = {}; self.current_page = ""; self.build_shell(); self.show_page(self.settings.get("last_page", "stock"))
         self.bind("<Configure>", self.remember_window_geometry)
         self.after_idle(self.restore_window)
 
-    def load_settings(self):
-        try: return json.loads(self.settings_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError): return {"theme": "Light"}
+    def save_settings(self): self.preferences_store.save(); self.settings = self.preferences_store.values
 
-    def save_settings(self): self.settings_path.write_text(json.dumps(self.settings, ensure_ascii=False, indent=2), encoding="utf-8")
+    def save_cloud_settings(self): self.cloud_session_store.values = self.cloud_settings; self.cloud_session_store.save(); self.cloud_settings = self.cloud_session_store.values
+
+    def capture_interface_preferences(self):
+        if self.current_page:self.settings["last_page"] = self.current_page
+        if hasattr(self,"stock_search"):self.settings["stock_search"] = self.stock_search.get()
+        if hasattr(self,"count_search"):self.settings["count_search"] = self.count_search.get()
+        if hasattr(self,"count_filter"):self.settings["count_filter"] = self.count_filter.get()
+        if hasattr(self,"m_operation"):self.settings["movement_operation"] = self.m_operation.get()
+        if hasattr(self,"m_user"):self.settings["movement_user"] = self.m_user.get()
+        if hasattr(self,"history_filter"):self.settings["history_filter"] = self.history_filter.get()
+        if hasattr(self,"product_suggestions_collapsed"):self.settings["movement_products_expanded"] = not self.product_suggestions_collapsed
+
+    def save_interface_state(self):self.capture_interface_preferences();self.save_settings()
 
     def restore_window(self):
         self.update_idletasks()
@@ -1091,9 +1107,11 @@ class EstoqueApp(ctk.CTk):
         self.content = ctk.CTkFrame(self, fg_color=COLORS["background"], corner_radius=0); self.content.grid(row=0,column=1,sticky="nsew"); self.content.grid_columnconfigure(0,weight=1); self.content.grid_rowconfigure(0,weight=1)
 
     def show_page(self,key):
+        self.capture_interface_preferences()
         for page in self.pages.values(): page.grid_remove()
         if key not in self.pages: self.pages[key]={"registration":self.registration_page,"stock":self.stock_page,"movements":self.movements_page,"count":self.count_page,"settings":self.settings_page}[key]()
         self.pages[key].grid(row=0,column=0,sticky="nsew",padx=32,pady=28)
+        self.current_page=key;self.settings["last_page"]=key;self.save_settings()
         for name,button in self.nav_buttons.items():
             selected = name == key
             button.configure(
@@ -1196,7 +1214,7 @@ class EstoqueApp(ctk.CTk):
         cards=ctk.CTkFrame(page,fg_color="transparent");cards.pack(fill="x",pady=(0,16));self.stock_cards_container=cards;self.stock_cards=[]
         for title in ("Produtos","Unidades em estoque","Abaixo do mínimo","Confiança baixa"):
             card=Card(cards,height=108);card.pack(side="left",fill="both",expand=True,padx=(0,12));card.pack_propagate(False);ctk.CTkLabel(card,text=title,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=18,pady=(17,3));label=ctk.CTkLabel(card,text="0",text_color=COLORS["text"],font=ctk.CTkFont("Inter",22,"bold"));label.pack(anchor="w",padx=18);self.stock_cards.append(label)
-        card=Card(page);card.pack(fill="both",expand=True);bar=ctk.CTkFrame(card,fg_color="transparent");bar.pack(fill="x",padx=20,pady=(18,8));ctk.CTkLabel(bar,text="Posição do estoque",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(side="left");self.stock_search=ctk.CTkEntry(bar,placeholder_text="Filtrar produto ou grupo...",width=300,height=38,corner_radius=9);self.stock_search.pack(side="right");self.stock_search.bind("<KeyRelease>",lambda e:self.refresh_stock())
+        card=Card(page);card.pack(fill="both",expand=True);bar=ctk.CTkFrame(card,fg_color="transparent");bar.pack(fill="x",padx=20,pady=(18,8));ctk.CTkLabel(bar,text="Posição do estoque",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(side="left");self.stock_search=ctk.CTkEntry(bar,placeholder_text="Filtrar produto ou grupo...",width=300,height=38,corner_radius=9);self.stock_search.pack(side="right");self.stock_search.insert(0,self.settings.get("stock_search",""));self.stock_search.bind("<KeyRelease>",lambda _event:(self.refresh_stock(),self.save_interface_state()))
         stock_table=ctk.CTkFrame(card,fg_color="transparent");stock_table.pack(fill="both",expand=True,padx=20,pady=(8,20));stock_table.grid_columnconfigure(0,weight=1);stock_table.grid_rowconfigure(0,weight=1)
         self.stock_tree=self.table(stock_table,("group","name","stock","confidence"),("Grupo / modelo","Produto","Saldo atual","Confiança"),(220,320,140,140));self.stock_tree.grid(row=0,column=0,sticky="nsew")
         self.stock_scrollbar=ctk.CTkScrollbar(stock_table,orientation="vertical",command=self.stock_tree.yview,button_color=COLORS["accent"],button_hover_color=COLORS["accent_hover"]);self.stock_scrollbar.grid(row=0,column=1,sticky="ns",padx=(8,0));self.stock_tree.configure(yscrollcommand=self.stock_scrollbar.set)
@@ -1241,10 +1259,10 @@ class EstoqueApp(ctk.CTk):
         ctk.CTkEntry(form,textvariable=self.c_note,height=36,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface"]).pack(fill="x",padx=20,pady=(0,10))
         ctk.CTkButton(form,text="Confirmar contagem",height=40,corner_radius=10,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.register_count).pack(fill="x",padx=20,pady=(0,14))
         listing=Card(body);listing.grid(row=0,column=1,sticky="nsew");bar=ctk.CTkFrame(listing,fg_color="transparent");bar.pack(fill="x",padx=20,pady=16);ctk.CTkLabel(bar,text="Check-in dos produtos",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(side="left")
-        self.count_filter=tk.StringVar(value="todos");ctk.CTkOptionMenu(bar,variable=self.count_filter,values=["todos","pendentes","verificados"],width=110,height=36,fg_color=COLORS["surface_alt"],button_color=COLORS["surface_hover"],text_color=COLORS["text"],command=lambda _v:self.refresh_counts()).pack(side="right")
+        self.count_filter=tk.StringVar(value=self.settings.get("count_filter","todos"));ctk.CTkOptionMenu(bar,variable=self.count_filter,values=["todos","pendentes","verificados"],width=110,height=36,fg_color=COLORS["surface_alt"],button_color=COLORS["surface_hover"],text_color=COLORS["text"],command=lambda _value:(self.refresh_counts(),self.save_interface_state())).pack(side="right")
         ctk.CTkButton(bar,text="Contar",image=self.icons["count"],width=95,height=36,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.prepare_count).pack(side="right",padx=(0,8))
         ctk.CTkButton(bar,text="Explicar",width=90,height=36,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.explain_confidence).pack(side="right",padx=(0,8))
-        self.count_search=ctk.CTkEntry(bar,placeholder_text="Filtrar produto...",width=165,height=36,corner_radius=9);self.count_search.pack(side="right",padx=(0,8));self.count_search.bind("<KeyRelease>",lambda _e:self.refresh_counts())
+        self.count_search=ctk.CTkEntry(bar,placeholder_text="Filtrar produto...",width=165,height=36,corner_radius=9);self.count_search.pack(side="right",padx=(0,8));self.count_search.insert(0,self.settings.get("count_search",""));self.count_search.bind("<KeyRelease>",lambda _event:(self.refresh_counts(),self.save_interface_state()))
         self.count_tree=self.table(listing,("product","stock","checkin","date","responsible","confidence","difference"),("Produto","Estoque atual","Check-in","Última contagem","Responsável","Confiança","Diferença"),(170,75,75,120,80,85,85));self.count_tree.pack(fill="both",expand=True,padx=20,pady=(0,20));self.count_tree.bind("<Double-1>",lambda _e:self.prepare_count());self.count_confidence_cells=TreeConfidenceOverlay(self.count_tree,COLORS,activate=self.prepare_count);self.count_age_cells=TreeRelativeDateOverlay(self.count_tree,COLORS);self.configure_tables();return page
 
     def update_count_current(self):
@@ -1302,12 +1320,12 @@ class EstoqueApp(ctk.CTk):
         self.movement_draft: list[dict] = []
         self.draft_edit_index: int | None = None
         self.m_selected_product_id: int | None = None
-        self.m_operation = tk.StringVar(value="Entrada")
+        self.m_operation = tk.StringVar(value=self.settings.get("movement_operation","Entrada"))
         self.m_product = tk.StringVar()
         self.m_quantity = tk.StringVar()
         self.m_reason = tk.StringVar()
-        self.m_user = tk.StringVar()
-        self.product_suggestions_collapsed = True
+        self.m_user = tk.StringVar(value=self.settings.get("movement_user",""))
+        self.product_suggestions_collapsed = not self.settings.get("movement_products_expanded",False)
 
         composer = Card(page)
         composer.pack(fill="x", pady=(0, 16))
@@ -1328,7 +1346,7 @@ class EstoqueApp(ctk.CTk):
         date_user.pack(fill="x", pady=(0, 12)); date_user.grid_columnconfigure((0, 1), weight=1)
         self.m_date_entry = MaskedDateEntry(date_user, COLORS, initial=date.today())
         self.m_date_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.m_user_menu=ctk.CTkOptionMenu(date_user,variable=self.m_user,values=["Cadastre um usuário"],height=38,corner_radius=9,fg_color=COLORS["surface"],button_color=COLORS["surface_alt"],button_hover_color=COLORS["surface_hover"],text_color=COLORS["text"],dropdown_fg_color=COLORS["surface"],dropdown_hover_color=COLORS["accent_soft"])
+        self.m_user_menu=ctk.CTkOptionMenu(date_user,variable=self.m_user,values=["Cadastre um usuário"],height=38,corner_radius=9,fg_color=COLORS["surface"],button_color=COLORS["surface_alt"],button_hover_color=COLORS["surface_hover"],text_color=COLORS["text"],dropdown_fg_color=COLORS["surface"],dropdown_hover_color=COLORS["accent_soft"],command=lambda _value:self.save_interface_state())
         self.m_user_menu.grid(row=0,column=1,sticky="ew",padx=(6,0))
         detail_label("Motivo ou observação do conjunto")
         ctk.CTkEntry(details, textvariable=self.m_reason, height=38, corner_radius=9, border_color=COLORS["border"], fg_color=COLORS["surface"]).pack(fill="x")
@@ -1347,7 +1365,7 @@ class EstoqueApp(ctk.CTk):
         ctk.CTkLabel(self.m_product_search,text="",image=self.icons["search"],width=42).grid(row=0,column=0,sticky="nsew",padx=(9,2),pady=4)
         self.m_product_entry=ctk.CTkEntry(self.m_product_search,textvariable=self.m_product,placeholder_text="Buscar produto, grupo ou variação...",height=34,corner_radius=0,border_width=0,fg_color="transparent")
         self.m_product_entry.grid(row=0,column=1,sticky="nsew",padx=(0,2),pady=3);self.m_product_entry.bind("<FocusIn>",lambda _event:self.show_product_suggestions(force=True));self.m_product_entry.bind("<KeyRelease>",self.on_product_search);self.m_product_entry.bind("<Return>",lambda _event:self.select_first_product_suggestion())
-        self.product_suggestions_toggle = ctk.CTkButton(self.m_product_search, text="", image=self.icons["expand"], width=36, height=32, corner_radius=7, fg_color=COLORS["surface_alt"], hover_color=COLORS["surface_hover"], command=self.toggle_product_suggestions)
+        self.product_suggestions_toggle = ctk.CTkButton(self.m_product_search, text="", image=self.icons["expand" if self.product_suggestions_collapsed else "collapse"], width=36, height=32, corner_radius=7, fg_color=COLORS["surface_alt"], hover_color=COLORS["surface_hover"], command=self.toggle_product_suggestions)
         self.product_suggestions_toggle.grid(row=0,column=2,sticky="e",padx=(2,5),pady=4)
         self.m_quantity_entry = ctk.CTkEntry(add_row, textvariable=self.m_quantity, placeholder_text="Quantidade", width=120, height=38, corner_radius=9, border_color=COLORS["border"], fg_color=COLORS["surface"])
         self.m_quantity_entry.grid(row=0, column=1, padx=(0, 8))
@@ -1369,8 +1387,8 @@ class EstoqueApp(ctk.CTk):
         bar = ctk.CTkFrame(history, fg_color="transparent")
         bar.pack(fill="x", padx=20, pady=16)
         ctk.CTkLabel(bar, text="Histórico", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 16, "bold")).pack(side="left")
-        self.history_filter = tk.StringVar(value="Todas as operações")
-        self.history_filter_menu = ctk.CTkOptionMenu(bar, variable=self.history_filter, values=["Todas as operações"], width=175, height=36, fg_color=COLORS["surface_alt"], button_color=COLORS["surface_hover"], text_color=COLORS["text"], command=lambda _value: self.refresh_movements())
+        self.history_filter = tk.StringVar(value=self.settings.get("history_filter","Todas as operações"))
+        self.history_filter_menu = ctk.CTkOptionMenu(bar, variable=self.history_filter, values=["Todas as operações"], width=175, height=36, fg_color=COLORS["surface_alt"], button_color=COLORS["surface_hover"], text_color=COLORS["text"], command=lambda _value:(self.refresh_movements(),self.save_interface_state()))
         self.history_filter_menu.pack(side="right")
         ctk.CTkButton(bar, text="Excluir", image=self.icons["trash"], width=92, height=36, corner_radius=9, fg_color=COLORS["surface_alt"], hover_color=COLORS["surface_hover"], text_color=COLORS["danger"], command=self.delete_movement).pack(side="right", padx=(8, 8))
         ctk.CTkButton(bar, text="Editar", image=self.icons["edit"], width=92, height=36, corner_radius=9, fg_color=COLORS["surface_alt"], hover_color=COLORS["surface_hover"], text_color=COLORS["text"], command=self.edit_movement).pack(side="right")
@@ -1378,6 +1396,7 @@ class EstoqueApp(ctk.CTk):
         self.history_tree.pack(fill="both", expand=True, padx=20, pady=(0, 20))
         self.history_tree.bind("<Double-1>", lambda _event: self.edit_movement())
         self.configure_tables()
+        if not self.product_suggestions_collapsed:self.show_product_suggestions()
         return page
 
     def product_map(self):return {f"{product_label(p)}  [{p['unit']}]":int(p["id"]) for p in self.db.products()}
@@ -1393,6 +1412,7 @@ class EstoqueApp(ctk.CTk):
         self.product_suggestions_toggle.configure(image=self.icons["expand" if self.product_suggestions_collapsed else "collapse"])
         if self.product_suggestions_collapsed:self.hide_product_suggestions()
         else:self.show_product_suggestions();self.m_product_entry.focus_set()
+        self.save_interface_state()
     def show_product_suggestions(self, force=False):
         if not hasattr(self,"product_suggestions"):return
         if force:
@@ -1449,6 +1469,7 @@ class EstoqueApp(ctk.CTk):
         if not hasattr(self, "m_quantity_entry"):return
         operation=self.db.operation(getattr(self, "operation_mapping", {}).get(self.m_operation.get(), 0))
         self.m_quantity_entry.configure(placeholder_text="Nova contagem" if operation and operation["effect"]=="set" else "Quantidade")
+        self.save_interface_state()
     def update_current_stock(self):
         pid=self.m_selected_product_id;self.current_stock.configure(text=f"Saldo atual: {fmt_number(self.db.stock(pid))}" if pid else "Saldo atual: —")
     def add_draft_item(self):
@@ -1527,7 +1548,7 @@ class EstoqueApp(ctk.CTk):
 
     def settings_page(self):
         page=ctk.CTkFrame(self.content,fg_color="transparent");PageTitle(page,"Configurações","Personalize a aparência e proteja seus dados.").pack(fill="x",pady=(0,22))
-        appearance=Card(page);appearance.pack(fill="x",pady=(0,16));row=ctk.CTkFrame(appearance,fg_color="transparent");row.pack(fill="x",padx=22,pady=20);ctk.CTkLabel(row,text="Tema da interface",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w");ctk.CTkLabel(row,text="Escolha entre o modo claro off-white e o modo escuro em grafite.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(4,12));self.theme_selector=ctk.CTkSegmentedButton(row,values=["Light","Dark"],command=self.change_theme,selected_color=COLORS["accent"],selected_hover_color=COLORS["accent_hover"]);self.theme_selector.pack(anchor="w");self.theme_selector.set(self.settings.get("theme","Light"))
+        appearance=Card(page);appearance.pack(fill="x",pady=(0,16));row=ctk.CTkFrame(appearance,fg_color="transparent");row.pack(fill="x",padx=22,pady=20);ctk.CTkLabel(row,text="Tema da interface",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w");ctk.CTkLabel(row,text="Escolha entre o modo claro off-white e o modo escuro em grafite.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(4,4));ctk.CTkLabel(row,text="Tema, janela, última tela e filtros ficam somente neste usuário do Windows e não são enviados ao Supabase.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(anchor="w",pady=(0,12));self.theme_selector=ctk.CTkSegmentedButton(row,values=["Light","Dark"],command=self.change_theme,selected_color=COLORS["accent"],selected_hover_color=COLORS["accent_hover"]);self.theme_selector.pack(anchor="w");self.theme_selector.set(self.settings.get("theme","Light"))
         cloud=Card(page);cloud.pack(fill="x",pady=(0,16));cloud_row=ctk.CTkFrame(cloud,fg_color="transparent");cloud_row.pack(fill="x",padx=22,pady=20)
         cloud_text=ctk.CTkFrame(cloud_row,fg_color="transparent");cloud_text.pack(side="left",fill="x",expand=True)
         ctk.CTkLabel(cloud_text,text="Supabase — cópia na nuvem",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w")
@@ -1548,25 +1569,25 @@ class EstoqueApp(ctk.CTk):
     def cloud_account(self):
         if self.cloud.signed_in:
             if messagebox.askyesno(APP_NAME,f"Sair da conta {self.cloud.email}?",parent=self):
-                self.cloud.sign_out();self.save_settings();self.update_cloud_status()
+                self.cloud.sign_out();self.save_cloud_settings();self.update_cloud_status()
         else:CloudLoginDialog(self)
 
     def cloud_upload(self):
         if not self.cloud.signed_in:CloudLoginDialog(self);return
         if not messagebox.askyesno(APP_NAME,"Enviar agora os produtos, movimentações, cadastros e fotos para sua conta privada no Supabase?",parent=self):return
-        try:self.cloud.upload(self.db.db)
+        try:self.cloud.upload(self.db.db);self.save_cloud_settings()
         except CloudSyncError as error:messagebox.showerror(APP_NAME,str(error),parent=self);return
         messagebox.showinfo(APP_NAME,"Dados enviados e protegidos no Supabase.",parent=self)
 
     def cloud_download(self):
         if not self.cloud.signed_in:CloudLoginDialog(self);return
         if not messagebox.askyesno(APP_NAME,"Baixar a cópia do Supabase e substituir os dados locais?\n\nUm backup local de segurança será criado automaticamente.",icon="warning",parent=self):return
-        try:updated_at=self.cloud.download(self.db.db)
+        try:updated_at=self.cloud.download(self.db.db);self.save_cloud_settings()
         except (CloudSyncError,KeyError,ValueError,sqlite3.Error,OSError) as error:messagebox.showerror(APP_NAME,f"Não foi possível baixar os dados.\n\n{error}",parent=self);return
         self.refresh_all();messagebox.showinfo(APP_NAME,f"Dados restaurados da nuvem.\nCópia remota: {updated_at[:19].replace('T',' ')}",parent=self)
 
     def change_theme(self,value):
-        self.settings["theme"]=value;self.save_settings();ctk.set_appearance_mode(value);self.configure_tables()
+        self.settings["theme"]=value;self.save_interface_state();ctk.set_appearance_mode(value);self.configure_tables()
         if hasattr(self,"stock_confidence_cells"):self.stock_confidence_cells.schedule()
         if hasattr(self,"stock_quantity_cells"):self.stock_quantity_cells.schedule()
         if hasattr(self,"count_confidence_cells"):self.count_confidence_cells.schedule()
@@ -1591,7 +1612,7 @@ class EstoqueApp(ctk.CTk):
             if state == "normal" and parse_window_geometry(self.geometry()): self._normal_geometry = self.geometry()
             self.settings["window_state"] = self._last_window_state
             self.settings["window_geometry"] = visible_window_geometry(self._normal_geometry, self.work_areas, self.minimum_width, self.minimum_height)
-            self.save_settings()
+            self.capture_interface_preferences();self.save_settings();self.save_cloud_settings()
         finally:
             self.db.db.close(); self.destroy()
 
