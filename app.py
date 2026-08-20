@@ -18,10 +18,10 @@ import customtkinter as ctk
 from PIL import ImageTk
 
 from premium_icons import app_icon, brand_mark, icon
-from premium_widgets import MaskedDateEntry
+from premium_widgets import ConfidenceGauge, MaskedDateEntry, confidence_tier
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.8.0"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -292,7 +292,7 @@ class Database:
         daily_penalty = min(15.0, movement_count / max(days, 1) * 5.0)
         volume_penalty = min(20.0, moved_units / reference * 10.0)
         score = int(round(max(5.0, min(100.0, base - age_penalty - movement_penalty - daily_penalty - volume_penalty))))
-        level = "Alta" if score >= 80 else "Média" if score >= 55 else "Baixa"
+        level, _color = confidence_tier(score)
         return {
             "score": score,
             "level": level,
@@ -600,13 +600,13 @@ class EstoqueApp(ctk.CTk):
         for title in ("Produtos","Unidades em estoque","Abaixo do mínimo","Confiança baixa"):
             card=Card(cards,height=108);card.pack(side="left",fill="both",expand=True,padx=(0,12));card.pack_propagate(False);ctk.CTkLabel(card,text=title,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=18,pady=(17,3));label=ctk.CTkLabel(card,text="0",text_color=COLORS["text"],font=ctk.CTkFont("Inter",22,"bold"));label.pack(anchor="w",padx=18);self.stock_cards.append(label)
         card=Card(page);card.pack(fill="both",expand=True);bar=ctk.CTkFrame(card,fg_color="transparent");bar.pack(fill="x",padx=20,pady=(18,8));ctk.CTkLabel(bar,text="Posição do estoque",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(side="left");self.stock_search=ctk.CTkEntry(bar,placeholder_text="Filtrar produto, grupo ou variação...",width=300,height=38,corner_radius=9);self.stock_search.pack(side="right");self.stock_search.bind("<KeyRelease>",lambda e:self.refresh_stock())
-        self.stock_tree=self.table(card,("group","name","variant","stock","unit","minimum","status","confidence","last_count"),("Grupo / modelo","Produto","Variação","Saldo atual","Un.","Mínimo","Situação","Confiança","Últ. contagem"),(130,140,110,70,40,55,85,90,95));self.stock_tree.pack(fill="both",expand=True,padx=20,pady=(8,20));self.configure_tables();return page
+        self.stock_tree=self.table(card,("group","name","variant","stock","unit","minimum","status","confidence"),("Grupo / modelo","Produto","Variação","Saldo atual","Un.","Mínimo","Situação","Confiança"),(145,160,125,80,45,60,100,105));self.stock_tree.pack(fill="both",expand=True,padx=20,pady=(8,20));self.configure_tables();return page
 
     def refresh_stock(self):
         if not hasattr(self,"stock_tree"):return
         items=self.db.products(self.stock_search.get() if hasattr(self,"stock_search") else "");self.stock_tree.delete(*self.stock_tree.get_children());units=low=low_confidence=0
         for p in items:
-            stock=float(p["stock"]);units+=stock;status="Sem estoque" if stock<=0 else "Estoque baixo" if stock<=float(p["minimum"]) else "Normal";low+=status!="Normal";trust=self.db.stock_confidence(int(p["id"]),stock);low_confidence+=trust["level"]=="Baixa";last=datetime.strptime(trust["last_date"],"%Y-%m-%d").strftime("%d/%m/%y") if trust["last_date"] else "Nunca contado";self.stock_tree.insert("","end",iid=str(p["id"]),values=(p["group_name"]or"Sem grupo",p["name"],p["variant"]or"—",fmt_number(stock),p["unit"],fmt_number(p["minimum"]),status,f"{trust['score']}% • {trust['level']}",last))
+            stock=float(p["stock"]);units+=stock;status="Sem estoque" if stock<=0 else "Estoque baixo" if stock<=float(p["minimum"]) else "Normal";low+=status!="Normal";trust=self.db.stock_confidence(int(p["id"]),stock);low_confidence+=trust["level"]=="Baixa";self.stock_tree.insert("","end",iid=str(p["id"]),values=(p["group_name"]or"Sem grupo",p["name"],p["variant"]or"—",fmt_number(stock),p["unit"],fmt_number(p["minimum"]),status,f"{trust['score']}% • {trust['level']}"))
         for label,text in zip(self.stock_cards,(str(len(items)),fmt_number(units),str(low),str(low_confidence))):label.configure(text=text)
 
     def count_page(self):
@@ -635,13 +635,29 @@ class EstoqueApp(ctk.CTk):
         ctk.CTkButton(bar,text="Contar",image=self.icons["count"],width=95,height=36,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.prepare_count).pack(side="right",padx=(0,8))
         ctk.CTkButton(bar,text="Explicar",width=90,height=36,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.explain_confidence).pack(side="right",padx=(0,8))
         self.count_search=ctk.CTkEntry(bar,placeholder_text="Filtrar produto...",width=165,height=36,corner_radius=9);self.count_search.pack(side="right",padx=(0,8));self.count_search.bind("<KeyRelease>",lambda _e:self.refresh_counts())
-        self.count_tree=self.table(listing,("product","stock","checkin","date","responsible","confidence","difference"),("Produto","Estoque atual","Check-in","Data","Responsável","Confiança","Diferença"),(170,75,75,70,80,85,85));self.count_tree.pack(fill="both",expand=True,padx=20,pady=(0,20));self.count_tree.bind("<Double-1>",lambda _e:self.prepare_count());self.configure_tables();return page
+        confidence_panel=ctk.CTkFrame(listing,height=174,corner_radius=10,fg_color=COLORS["surface_alt"],border_width=1,border_color=COLORS["border"]);confidence_panel.pack(fill="x",padx=20,pady=(0,14));confidence_panel.pack_propagate(False)
+        self.confidence_gauge=ConfidenceGauge(confidence_panel,COLORS,width=248);self.confidence_gauge.pack(side="left",padx=(16,20),pady=10)
+        confidence_text=ctk.CTkFrame(confidence_panel,fg_color="transparent");confidence_text.pack(side="left",fill="both",expand=True,pady=22,padx=(0,18))
+        self.confidence_title=ctk.CTkLabel(confidence_text,text="Confiança média do estoque",text_color=COLORS["text"],font=ctk.CTkFont("Inter",14,"bold"),anchor="w");self.confidence_title.pack(fill="x")
+        self.confidence_description=ctk.CTkLabel(confidence_text,text="Visão geral calculada a partir de todos os produtos cadastrados.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10),justify="left",anchor="nw",wraplength=460);self.confidence_description.pack(fill="x",pady=(7,9))
+        legend=ctk.CTkFrame(confidence_text,fg_color="transparent");legend.pack(fill="x")
+        for text,color in (("● Baixa",("#C94B4B","#FF6B6B")),("● Média",("#B77912","#FFD166")),("● Alta",("#27845E","#4ADE80")),("● Máxima",("#2478C4","#38BDF8"))):ctk.CTkLabel(legend,text=text,text_color=color,font=ctk.CTkFont("Inter",9,"bold")).pack(side="left",padx=(0,14))
+        self.count_tree=self.table(listing,("product","stock","checkin","date","responsible","confidence","difference"),("Produto","Estoque atual","Check-in","Data","Responsável","Confiança","Diferença"),(170,75,75,70,80,85,85));self.count_tree.pack(fill="both",expand=True,padx=20,pady=(0,20));self.count_tree.bind("<<TreeviewSelect>>",lambda _e:self.update_confidence_gauge());self.count_tree.bind("<Double-1>",lambda _e:self.prepare_count());self.configure_tables();return page
 
     def update_count_current(self):
         pid=self.product_map().get(self.c_product.get()) if hasattr(self,"c_product") else None
         if not hasattr(self,"count_current"):return
         product=self.db.product(pid) if pid else None
         self.count_current.configure(text=f"Saldo do sistema: {fmt_number(product['stock'])} {product['unit']}" if product else "Saldo do sistema: —")
+        if product:self.show_product_confidence(product)
+
+    def show_product_confidence(self,product):
+        if not hasattr(self,"confidence_gauge"):return
+        trust=self.db.stock_confidence(int(product["id"]),float(product["stock"]));self.confidence_gauge.set_score(trust["score"]);self.confidence_title.configure(text=product_label(product));self.confidence_description.configure(text=f"{trust['level']} • {trust['days']} dia(s) desde a referência • {trust['movement_count']} movimentação(ões) • {fmt_number(trust['moved_units'])} {product['unit']} movimentadas.")
+
+    def update_confidence_gauge(self):
+        pid=self.selected_count_product()
+        if pid:self.show_product_confidence(self.db.product(pid))
 
     def selected_count_product(self):
         selected=self.count_tree.selection() if hasattr(self,"count_tree") else ();return int(selected[0]) if selected else None
@@ -683,6 +699,8 @@ class EstoqueApp(ctk.CTk):
             last=datetime.strptime(trust["last_date"],"%Y-%m-%d").strftime("%d/%m/%y") if trust["last_date"] else "—";difference="—" if trust["last_difference"] is None else f"{'+' if trust['last_difference']>0 else ''}{fmt_number(trust['last_difference'])} {p['unit']}";self.count_tree.insert("","end",iid=str(p["id"]),values=(product_label(p),f"{fmt_number(p['stock'])} {p['unit']}",trust["checkin"],last,trust["checked_by"]or"—",f"{trust['score']}% • {trust['level']}",difference))
         average=round(total_score/len(all_items)) if all_items else 0
         for label,text in zip(self.count_cards,(str(pending),str(counted_today),str(differences_today),f"{average}%")):label.configure(text=text)
+        if hasattr(self,"confidence_gauge") and not self.count_tree.selection():
+            self.confidence_gauge.set_score(average if all_items else None);self.confidence_title.configure(text="Confiança média do estoque");self.confidence_description.configure(text="Visão geral calculada a partir de todos os produtos cadastrados." if all_items else "Cadastre um produto para começar a medir a confiança do estoque.")
 
     def movements_page(self):
         page=ctk.CTkFrame(self.content,fg_color="transparent");PageTitle(page,"Movimentações","Registre entradas, saídas, ajustes e contagens de inventário.").pack(fill="x",pady=(0,22));body=ctk.CTkFrame(page,fg_color="transparent");body.pack(fill="both",expand=True);body.grid_columnconfigure(1,weight=1);body.grid_rowconfigure(0,weight=1)
@@ -755,6 +773,7 @@ class EstoqueApp(ctk.CTk):
 
     def change_theme(self,value):
         self.settings["theme"]=value;self.save_settings();ctk.set_appearance_mode(value);self.configure_tables()
+        if hasattr(self,"confidence_gauge"):self.confidence_gauge.redraw()
     def check_updates(self):
         try:
             req=urllib.request.Request(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",headers={"User-Agent":APP_NAME});release=json.load(urllib.request.urlopen(req,timeout=10));latest=release["tag_name"].lstrip("v")

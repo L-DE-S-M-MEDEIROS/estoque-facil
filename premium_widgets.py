@@ -2,11 +2,125 @@ from __future__ import annotations
 
 import calendar
 from datetime import date, datetime
+import math
 import tkinter as tk
 
 import customtkinter as ctk
+from PIL import Image, ImageDraw
 
 from premium_icons import icon
+
+
+CONFIDENCE_TIERS = (
+    (95, "Máxima", ("#2478C4", "#38BDF8")),
+    (80, "Alta", ("#27845E", "#4ADE80")),
+    (55, "Média", ("#B77912", "#FFD166")),
+    (0, "Baixa", ("#C94B4B", "#FF6B6B")),
+)
+
+
+def confidence_tier(score: int) -> tuple[str, tuple[str, str]]:
+    """Return the label and theme-aware color for a confidence score."""
+    bounded = max(0, min(100, int(score)))
+    return next((label, color) for minimum, label, color in CONFIDENCE_TIERS if bounded >= minimum)
+
+
+def _appearance_color(value: str | tuple[str, str]) -> str:
+    if isinstance(value, tuple):
+        return value[1] if ctk.get_appearance_mode() == "Dark" else value[0]
+    return value
+
+
+class ConfidenceGauge(ctk.CTkFrame):
+    """High-resolution semicircular confidence gauge for Light and Dark themes."""
+
+    def __init__(self, master, colors: dict, width: int = 250, **kwargs):
+        super().__init__(master, fg_color="transparent", **kwargs)
+        self.colors = colors
+        self.display_width = width
+        self.display_height = max(112, round(width * .48))
+        self.score: int | None = None
+        self._image = None
+        self.image_label = ctk.CTkLabel(self, text="", width=self.display_width, height=self.display_height)
+        self.image_label.pack()
+        self.value_label = ctk.CTkLabel(
+            self,
+            text="—",
+            text_color=colors["muted"],
+            font=ctk.CTkFont("Inter", 18, "bold"),
+        )
+        self.value_label.pack(pady=(0, 1))
+        self.level_label = ctk.CTkLabel(
+            self,
+            text="Selecione um produto",
+            text_color=colors["muted"],
+            font=ctk.CTkFont("Inter", 10, "bold"),
+        )
+        self.level_label.pack()
+        self.redraw()
+
+    def _gauge_image(self) -> Image.Image:
+        scale = 4
+        width, height = self.display_width * scale, self.display_height * scale
+        image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        center_x, center_y = width // 2, round(height * .88)
+        radius = min(round(width * .39), round(height * .72))
+        stroke = max(12, round(width * .055))
+        box = (center_x - radius, center_y - radius, center_x + radius, center_y + radius)
+        track = _appearance_color(self.colors["border"])
+        draw.arc(box, start=180, end=360, fill=track, width=stroke)
+
+        for tick_score in (0, 25, 50, 75, 100):
+            angle = math.pi - math.pi * tick_score / 100
+            outer = radius + round(stroke * .58)
+            inner = radius + round(stroke * .12)
+            draw.line(
+                (
+                    center_x + inner * math.cos(angle),
+                    center_y - inner * math.sin(angle),
+                    center_x + outer * math.cos(angle),
+                    center_y - outer * math.sin(angle),
+                ),
+                fill=_appearance_color(self.colors["muted"]),
+                width=max(3, stroke // 7),
+            )
+
+        if self.score is not None:
+            level, tier_color = confidence_tier(self.score)
+            color = _appearance_color(tier_color)
+            progress_end = 180 + self.score * 1.8
+            draw.arc(box, start=180, end=progress_end, fill=color, width=stroke)
+            angle = math.pi - math.pi * self.score / 100
+            needle_radius = radius - round(stroke * .65)
+            end_x = center_x + needle_radius * math.cos(angle)
+            end_y = center_y - needle_radius * math.sin(angle)
+            draw.line((center_x, center_y, end_x, end_y), fill=color, width=max(10, stroke // 3))
+            hub = max(14, stroke // 2)
+            draw.ellipse((center_x - hub, center_y - hub, center_x + hub, center_y + hub), fill=color)
+            core = max(5, hub // 3)
+            draw.ellipse(
+                (center_x - core, center_y - core, center_x + core, center_y + core),
+                fill=_appearance_color(self.colors["surface"]),
+            )
+
+        return image.resize((self.display_width, self.display_height), Image.Resampling.LANCZOS)
+
+    def redraw(self):
+        rendered = self._gauge_image()
+        self._image = ctk.CTkImage(light_image=rendered, dark_image=rendered, size=(self.display_width, self.display_height))
+        self.image_label.configure(image=self._image)
+        if self.score is None:
+            self.value_label.configure(text="—", text_color=self.colors["muted"])
+            self.level_label.configure(text="Selecione um produto", text_color=self.colors["muted"])
+            return
+        level, color = confidence_tier(self.score)
+        self.value_label.configure(text=f"{self.score}%", text_color=color)
+        self.level_label.configure(text=level.upper(), text_color=color)
+
+    def set_score(self, score: int | None):
+        self.score = None if score is None else max(0, min(100, int(score)))
+        self.redraw()
 
 
 class CalendarPopup(ctk.CTkToplevel):
