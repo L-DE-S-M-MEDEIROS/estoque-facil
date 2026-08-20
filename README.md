@@ -1,10 +1,11 @@
-# Estoque Fácil
+# Estoque Bolsas Baby
 
 Aplicativo desktop nativo para Windows, desenvolvido em Python com Tkinter e SQLite.
 
 ## Recursos
 
 - Cadastro de produtos sem SKU ou código de barras
+- Organização por Categoria, Grupo/modelo e Variação, mantendo estoque independente
 - Foto opcional, categoria, unidade, custo e estoque mínimo
 - Aba **Estoque atual** com saldo, situação e valor estimado
 - Entradas, saídas, ajustes e inventário com data editável

@@ -1,11 +1,39 @@
 from __future__ import annotations
 
 import math
+import sys
+from pathlib import Path
 from PIL import Image, ImageDraw
 import customtkinter as ctk
 
 LIGHT_ICON = "#506178"
 DARK_ICON = "#8BD5FF"
+
+
+def _resource_path(relative_path: str) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / relative_path
+
+
+def brand_mark(display_width: int = 86) -> ctk.CTkImage:
+    """Create a theme-aware monochrome mark from the supplied Bolsas Baby logo."""
+    source_path = _resource_path("assets/brand/icone-bolsas-baby.png")
+    with Image.open(source_path) as source_file:
+        source = source_file.convert("RGBA")
+
+    # The upper part is the baby-and-birds illustration; the lettering remains
+    # as live UI text beside it so it stays crisp at every Windows DPI scale.
+    illustration = source.crop((0, 0, source.width, round(source.height * .65)))
+    bounds = illustration.getchannel("A").getbbox()
+    if bounds:
+        illustration = illustration.crop(bounds)
+    alpha = illustration.getchannel("A")
+    light = Image.new("RGBA", illustration.size, (0, 0, 0, 0))
+    dark = Image.new("RGBA", illustration.size, (255, 255, 255, 0))
+    light.putalpha(alpha)
+    dark.putalpha(alpha)
+    display_height = max(24, round(display_width * illustration.height / illustration.width))
+    return ctk.CTkImage(light_image=light, dark_image=dark, size=(display_width, display_height))
 
 
 def _draw_icon(name: str, color: str, size: int = 256) -> Image.Image:

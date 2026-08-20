@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import re
 import shutil
 import sqlite3
 import sys
@@ -16,11 +17,11 @@ from tkinter import filedialog, messagebox, ttk
 import customtkinter as ctk
 from PIL import ImageTk
 
-from premium_icons import app_icon, icon
+from premium_icons import app_icon, brand_mark, icon
 from premium_widgets import MaskedDateEntry
 
-APP_NAME = "Estoque Fácil"
-APP_VERSION = "0.5.0"
+APP_NAME = "ESTOQUE BOLSAS BABY"
+APP_VERSION = "0.6.0"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -31,9 +32,10 @@ COLORS = {
     "text": ("#202936", "#F3F7FB"),
     "muted": ("#748092", "#91A0B5"),
     "border": ("#DEE5EC", "#263244"),
-    "accent": ("#4A9FD8", "#36BFFA"),
-    "accent_hover": ("#368BC3", "#67D3FF"),
-    "accent_soft": ("#E5F3FC", "#102B3D"),
+    "accent": ("#2B6F9F", "#36BFFA"),
+    "accent_hover": ("#245F89", "#67D3FF"),
+    "accent_soft": ("#E4F0F7", "#102B3D"),
+    "nav_selected": ("#D1E7F3", "#102B3D"),
     "danger": ("#C75353", "#FF7B7B"),
     "warning": ("#C47B32", "#FFB768"),
     "success": ("#2E8B68", "#4DD6A3"),
@@ -53,6 +55,89 @@ def enable_dpi_awareness() -> None:
             ctypes.windll.user32.SetProcessDPIAware()
 
 
+class _Rect(ctypes.Structure):
+    _fields_ = (("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long))
+
+
+class _MonitorInfo(ctypes.Structure):
+    _fields_ = (("cbSize", ctypes.c_ulong), ("rcMonitor", _Rect), ("rcWork", _Rect), ("dwFlags", ctypes.c_ulong))
+
+
+def monitor_work_areas(screen_width: int, screen_height: int) -> list[tuple[int, int, int, int]]:
+    """Return monitor work areas, keeping the primary monitor first."""
+    if sys.platform != "win32":
+        return [(0, 0, screen_width, screen_height)]
+
+    monitors: list[tuple[bool, tuple[int, int, int, int]]] = []
+    try:
+        callback_type = ctypes.WINFUNCTYPE(
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(_Rect),
+            ctypes.c_ssize_t,
+        )
+
+        def collect(handle, _device_context, _monitor_rect, _data):
+            info = _MonitorInfo()
+            info.cbSize = ctypes.sizeof(_MonitorInfo)
+            if ctypes.windll.user32.GetMonitorInfoW(handle, ctypes.byref(info)):
+                work = info.rcWork
+                monitors.append((bool(info.dwFlags & 1), (work.left, work.top, work.right, work.bottom)))
+            return 1
+
+        ctypes.windll.user32.EnumDisplayMonitors(None, None, callback_type(collect), 0)
+    except (AttributeError, OSError, ValueError):
+        monitors = []
+
+    if not monitors:
+        return [(0, 0, screen_width, screen_height)]
+    monitors.sort(key=lambda item: not item[0])
+    return [area for _primary, area in monitors]
+
+
+def parse_window_geometry(value: object) -> tuple[int, int, int, int] | None:
+    match = re.fullmatch(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)", str(value or ""))
+    if not match:
+        return None
+    width, height, x, y = (int(part) for part in match.groups())
+    return width, height, x, y
+
+
+def visible_window_geometry(
+    saved: object,
+    work_areas: list[tuple[int, int, int, int]],
+    minimum_width: int,
+    minimum_height: int,
+) -> str:
+    """Clamp a saved window to a currently connected monitor's work area."""
+    primary = work_areas[0]
+    parsed = parse_window_geometry(saved)
+    if parsed is None:
+        left, top, right, bottom = primary
+        width = max(minimum_width, round((right - left) * .90))
+        height = max(minimum_height, round((bottom - top) * .88))
+        width, height = min(width, right - left), min(height, bottom - top)
+        x, y = left + (right - left - width) // 2, top + (bottom - top - height) // 2
+        return f"{width}x{height}+{x}+{y}"
+
+    width, height, x, y = parsed
+
+    def overlap(area: tuple[int, int, int, int]) -> int:
+        left, top, right, bottom = area
+        return max(0, min(x + width, right) - max(x, left)) * max(0, min(y + height, bottom) - max(y, top))
+
+    target = max(work_areas, key=overlap)
+    if overlap(target) == 0:
+        target = primary
+    left, top, right, bottom = target
+    width = min(max(width, minimum_width), right - left)
+    height = min(max(height, minimum_height), bottom - top)
+    x = min(max(x, left), right - width)
+    y = min(max(y, top), bottom - height)
+    return f"{width}x{height}{x:+d}{y:+d}"
+
+
 def data_dir() -> Path:
     folder = Path.home() / "AppData" / "Local" / "EstoqueFacil"
     folder.mkdir(parents=True, exist_ok=True)
@@ -69,6 +154,11 @@ def fmt_money(value: float | None) -> str:
     if value is None:
         return "—"
     return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def product_label(product: sqlite3.Row) -> str:
+    parts = [product["group_name"], product["name"], product["variant"]]
+    return " • ".join(str(part) for part in parts if part)
 
 
 class Database:
@@ -92,24 +182,33 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_movements_product ON movements(product_id);
             CREATE INDEX IF NOT EXISTS idx_movements_date ON movements(movement_date DESC);
         """)
+        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(products)")}
+        if "group_name" not in columns:
+            self.db.execute("ALTER TABLE products ADD COLUMN group_name TEXT NOT NULL DEFAULT ''")
+        if "variant" not in columns:
+            self.db.execute("ALTER TABLE products ADD COLUMN variant TEXT NOT NULL DEFAULT ''")
         self.db.commit()
 
     def products(self, search: str = "") -> list[sqlite3.Row]:
         term = f"%{search.strip()}%"
         return self.db.execute("""SELECT p.*,COALESCE(SUM(m.quantity),0) stock
             FROM products p LEFT JOIN movements m ON m.product_id=p.id
-            WHERE p.name LIKE ? OR p.category LIKE ? GROUP BY p.id ORDER BY p.name COLLATE NOCASE""", (term, term)).fetchall()
+            WHERE p.name LIKE ? OR p.category LIKE ? OR p.group_name LIKE ? OR p.variant LIKE ?
+            GROUP BY p.id ORDER BY p.group_name COLLATE NOCASE,p.name COLLATE NOCASE,p.variant COLLATE NOCASE""", (term, term, term, term)).fetchall()
+
+    def groups(self) -> list[str]:
+        return [row["group_name"] for row in self.db.execute("SELECT DISTINCT group_name FROM products WHERE group_name<>'' ORDER BY group_name COLLATE NOCASE")]
 
     def product(self, product_id: int) -> sqlite3.Row | None:
         return self.db.execute("""SELECT p.*,COALESCE(SUM(m.quantity),0) stock
             FROM products p LEFT JOIN movements m ON m.product_id=p.id WHERE p.id=? GROUP BY p.id""", (product_id,)).fetchone()
 
     def save_product(self, values: dict, product_id: int | None = None) -> None:
-        fields = (values["name"], values["category"], values["unit"], values["cost"], values["minimum"], values["photo"], values["notes"])
+        fields = (values["name"], values["category"], values["group_name"], values["variant"], values["unit"], values["cost"], values["minimum"], values["photo"], values["notes"])
         if product_id:
-            self.db.execute("UPDATE products SET name=?,category=?,unit=?,cost=?,minimum=?,photo=?,notes=? WHERE id=?", fields + (product_id,))
+            self.db.execute("UPDATE products SET name=?,category=?,group_name=?,variant=?,unit=?,cost=?,minimum=?,photo=?,notes=? WHERE id=?", fields + (product_id,))
         else:
-            self.db.execute("INSERT INTO products(name,category,unit,cost,minimum,photo,notes,created_at) VALUES(?,?,?,?,?,?,?,?)", fields + (datetime.now().isoformat(timespec="seconds"),))
+            self.db.execute("INSERT INTO products(name,category,group_name,variant,unit,cost,minimum,photo,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", fields + (datetime.now().isoformat(timespec="seconds"),))
         self.db.commit()
 
     def delete_product(self, product_id: int) -> bool:
@@ -134,7 +233,7 @@ class Database:
 
     def movements(self, kind: str = "todos") -> list[sqlite3.Row]:
         where, args = ("", ()) if kind == "todos" else ("WHERE m.type=?", (kind,))
-        return self.db.execute(f"""SELECT m.*,p.name,p.unit FROM movements m JOIN products p ON p.id=m.product_id
+        return self.db.execute(f"""SELECT m.*,p.name,p.group_name,p.variant,p.unit FROM movements m JOIN products p ON p.id=m.product_id
             {where} ORDER BY m.movement_date DESC,m.created_at DESC LIMIT 500""", args).fetchall()
 
     def backup(self, target: Path) -> None:
@@ -177,17 +276,19 @@ class ProductDialog(ctk.CTkToplevel):
         form.grid(row=1, column=0, sticky="nsew", padx=24, pady=20); self.grid_rowconfigure(1, weight=1); form.grid_columnconfigure((0, 1), weight=1)
         self.name = self.field(form, "Nome do produto *", 0, 0, product["name"] if product else "", 2)
         self.category = self.field(form, "Categoria", 2, 0, product["category"] if product else "")
-        self.unit = self.field(form, "Unidade", 2, 1, product["unit"] if product else "un", combo=["un", "kg", "g", "l", "ml", "cx", "pct"])
-        self.cost = self.field(form, "Custo unitário", 4, 0, "" if not product or product["cost"] is None else str(product["cost"]))
-        self.minimum = self.field(form, "Estoque mínimo", 4, 1, str(product["minimum"] if product else 0))
+        self.group_name = self.field(form, "Grupo / modelo", 2, 1, product["group_name"] if product else "")
+        self.variant = self.field(form, "Variação", 4, 0, product["variant"] if product else "", 2)
+        self.unit = self.field(form, "Unidade", 6, 0, product["unit"] if product else "un", combo=["un", "kg", "g", "l", "ml", "cx", "pct"])
+        self.cost = self.field(form, "Custo unitário", 6, 1, "" if not product or product["cost"] is None else str(product["cost"]))
+        self.minimum = self.field(form, "Estoque mínimo", 8, 0, str(product["minimum"] if product else 0))
         self.photo = product["photo"] if product else ""
-        ctk.CTkLabel(form, text="Foto opcional", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 11, "bold")).grid(row=6, column=0, sticky="w", padx=(0, 8), pady=(8, 6))
+        ctk.CTkLabel(form, text="Foto opcional", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 11, "bold")).grid(row=10, column=0, sticky="w", padx=(0, 8), pady=(8, 6))
         self.photo_button = ctk.CTkButton(form, text=Path(self.photo).name if self.photo else "Escolher foto", image=icon("upload", 18), fg_color=COLORS["surface_alt"], hover_color=COLORS["surface_hover"], text_color=COLORS["text"], command=self.choose_photo)
-        self.photo_button.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(0, 16), ipady=3)
-        ctk.CTkLabel(form, text="Observações", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 11, "bold")).grid(row=8, column=0, sticky="w", pady=(0, 6))
+        self.photo_button.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(0, 16), ipady=3)
+        ctk.CTkLabel(form, text="Observações", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 11, "bold")).grid(row=12, column=0, sticky="w", pady=(0, 6))
         self.notes = ctk.CTkTextbox(form, height=90, corner_radius=9, border_width=1, border_color=COLORS["border"], fg_color=COLORS["surface"])
-        self.notes.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(0, 20)); self.notes.insert("1.0", product["notes"] if product else "")
-        actions = ctk.CTkFrame(form, fg_color="transparent"); actions.grid(row=10, column=0, columnspan=2, sticky="e")
+        self.notes.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(0, 20)); self.notes.insert("1.0", product["notes"] if product else "")
+        actions = ctk.CTkFrame(form, fg_color="transparent"); actions.grid(row=14, column=0, columnspan=2, sticky="e")
         ctk.CTkButton(actions, text="Cancelar", width=110, fg_color=COLORS["surface_alt"], hover_color=COLORS["surface_hover"], text_color=COLORS["text"], command=self.destroy).pack(side="left", padx=6)
         ctk.CTkButton(actions, text="Salvar produto", width=145, fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], command=self.save).pack(side="left", padx=6)
         self.name.focus_set()
@@ -195,7 +296,7 @@ class ProductDialog(ctk.CTkToplevel):
     def field(self, parent, label, row, column, value, span=1, combo=None):
         padx = (0, 8) if column == 0 else (8, 0)
         ctk.CTkLabel(parent, text=label, text_color=COLORS["text"], font=ctk.CTkFont("Inter", 11, "bold")).grid(row=row, column=column, sticky="w", padx=padx, pady=(0, 6))
-        widget = ctk.CTkComboBox(parent, values=combo, corner_radius=9, border_color=COLORS["border"], fg_color=COLORS["surface"], button_color=COLORS["accent"]) if combo else ctk.CTkEntry(parent, corner_radius=9, border_color=COLORS["border"], fg_color=COLORS["surface"])
+        widget = ctk.CTkOptionMenu(parent, values=combo, corner_radius=9, fg_color=COLORS["surface"], button_color=COLORS["accent"], button_hover_color=COLORS["accent_hover"], text_color=COLORS["text"], dropdown_fg_color=COLORS["surface"], dropdown_hover_color=COLORS["accent_soft"]) if combo else ctk.CTkEntry(parent, corner_radius=9, border_color=COLORS["border"], fg_color=COLORS["surface"])
         widget.grid(row=row+1, column=column, columnspan=span, sticky="ew", padx=padx, pady=(0, 16), ipady=3); widget.set(value) if combo else widget.insert(0, value); return widget
 
     def choose_photo(self):
@@ -215,34 +316,64 @@ class ProductDialog(ctk.CTkToplevel):
             source = Path(photo)
             if source.exists():
                 target = data_dir()/"fotos"/f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}{source.suffix.lower()}"; shutil.copy2(source, target); photo = str(target)
-        self.result = {"name": name, "category": self.category.get().strip(), "unit": self.unit.get(), "cost": cost, "minimum": minimum, "photo": photo, "notes": self.notes.get("1.0", "end").strip()}; self.destroy()
+        self.result = {"name": name, "category": self.category.get().strip(), "group_name": self.group_name.get().strip(), "variant": self.variant.get().strip(), "unit": self.unit.get(), "cost": cost, "minimum": minimum, "photo": photo, "notes": self.notes.get("1.0", "end").strip()}; self.destroy()
 
 
 class EstoqueApp(ctk.CTk):
     def __init__(self):
         super().__init__(fg_color=COLORS["background"])
+        self.withdraw()
         dpi = float(self.winfo_fpixels("1i")); self.ui_scale = max(1, min(dpi/96, 3)); self.tk.call("tk", "scaling", dpi/72)
         self.settings_path = data_dir()/"settings.json"; self.settings = self.load_settings(); ctk.set_appearance_mode(self.settings.get("theme", "Light"))
         self.db = Database(); self.title(f"{APP_NAME} — v{APP_VERSION}")
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight(); w, h = round(sw*.9), round(sh*.88); self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}"); self.minsize(min(sw, round(1050*self.ui_scale)), min(sh, round(680*self.ui_scale)))
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight(); self.work_areas = monitor_work_areas(sw, sh)
+        primary = self.work_areas[0]; work_width, work_height = primary[2]-primary[0], primary[3]-primary[1]
+        self.minimum_width = min(work_width, round(1050*self.ui_scale)); self.minimum_height = min(work_height, round(680*self.ui_scale))
+        self.minsize(self.minimum_width, self.minimum_height)
+        self._normal_geometry = visible_window_geometry(self.settings.get("window_geometry"), self.work_areas, self.minimum_width, self.minimum_height)
+        self.geometry(self._normal_geometry)
+        self._last_window_state = self.settings.get("window_state", "zoomed") if self.settings.get("window_state") in ("normal", "zoomed") else "zoomed"
         self.iconphoto(True, ImageTk.PhotoImage(app_icon(256))); self.protocol("WM_DELETE_WINDOW", self.close)
+        self.brand_icon = brand_mark(86)
         self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "settings", "plus", "search", "edit", "trash", "download", "upload", "refresh")}
         self.nav_buttons = {}; self.pages = {}; self.build_shell(); self.show_page("stock")
+        self.bind("<Configure>", self.remember_window_geometry)
+        self.after_idle(self.restore_window)
 
     def load_settings(self):
         try: return json.loads(self.settings_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError): return {"theme": "Light"}
 
-    def save_settings(self): self.settings_path.write_text(json.dumps(self.settings), encoding="utf-8")
+    def save_settings(self): self.settings_path.write_text(json.dumps(self.settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def restore_window(self):
+        self.update_idletasks()
+        self.deiconify()
+        if self._last_window_state == "zoomed":
+            try: self.state("zoomed")
+            except tk.TclError: self.geometry(self._normal_geometry)
+        else:
+            self.state("normal"); self.geometry(self._normal_geometry)
+        self.after(80, self.lift)
+
+    def remember_window_geometry(self, _event=None):
+        try: state = self.state()
+        except tk.TclError: return
+        if state == "zoomed":
+            self._last_window_state = "zoomed"
+        elif state == "normal" and self.winfo_width() >= 300 and self.winfo_height() >= 240:
+            self._last_window_state = "normal"
+            geometry = self.geometry()
+            if parse_window_geometry(geometry): self._normal_geometry = geometry
 
     def build_shell(self):
         self.grid_columnconfigure(1, weight=1); self.grid_rowconfigure(0, weight=1)
         self.sidebar = ctk.CTkFrame(self, width=265, corner_radius=0, fg_color=COLORS["sidebar"]); self.sidebar.grid(row=0, column=0, sticky="nsw"); self.sidebar.grid_propagate(False)
         logo = ctk.CTkFrame(self.sidebar, fg_color="transparent"); logo.pack(fill="x", padx=24, pady=(28, 34))
-        ctk.CTkLabel(logo, text="EF", width=46, height=46, corner_radius=12, fg_color=COLORS["accent"], text_color="#FFFFFF", font=ctk.CTkFont("Inter", 15, "bold")).pack(side="left")
+        ctk.CTkLabel(logo, text="", image=self.brand_icon, width=86, height=46).pack(side="left")
         brand = ctk.CTkFrame(logo, fg_color="transparent"); brand.pack(side="left", padx=13)
-        ctk.CTkLabel(brand, text="Estoque Fácil", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 16, "bold")).pack(anchor="w")
-        ctk.CTkLabel(brand, text="CONTROLE INTELIGENTE", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 9)).pack(anchor="w", pady=(2,0))
+        ctk.CTkLabel(brand, text="ESTOQUE", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 16, "bold")).pack(anchor="w")
+        ctk.CTkLabel(brand, text="BOLSAS BABY", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10, "bold")).pack(anchor="w", pady=(2,0))
         for key, label in (("stock","Estoque atual"),("movements","Movimentações"),("products","Produtos"),("settings","Configurações")):
             button = ctk.CTkButton(self.sidebar, text=label, image=self.icons[key], compound="left", anchor="w", height=48, corner_radius=10, fg_color="transparent", hover_color=COLORS["surface_hover"], text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 13, "bold"), command=lambda k=key:self.show_page(k))
             button.pack(fill="x", padx=16, pady=4); self.nav_buttons[key]=button
@@ -253,7 +384,14 @@ class EstoqueApp(ctk.CTk):
         for page in self.pages.values(): page.grid_remove()
         if key not in self.pages: self.pages[key]={"products":self.products_page,"stock":self.stock_page,"movements":self.movements_page,"settings":self.settings_page}[key]()
         self.pages[key].grid(row=0,column=0,sticky="nsew",padx=32,pady=28)
-        for name,button in self.nav_buttons.items(): button.configure(fg_color=COLORS["accent_soft"] if name==key else "transparent", text_color=COLORS["accent"] if name==key else COLORS["muted"])
+        for name,button in self.nav_buttons.items():
+            selected = name == key
+            button.configure(
+                fg_color=COLORS["nav_selected"] if selected else "transparent",
+                text_color=COLORS["accent"] if selected else COLORS["muted"],
+                border_width=1 if selected else 0,
+                border_color=COLORS["accent"] if selected else COLORS["sidebar"],
+            )
         {"products":self.refresh_products,"stock":self.refresh_stock,"movements":self.refresh_movements,"settings":lambda:None}[key]()
 
     def table(self,parent,columns,headings,widths):
@@ -267,15 +405,15 @@ class EstoqueApp(ctk.CTk):
 
     def products_page(self):
         page=ctk.CTkFrame(self.content,fg_color="transparent"); PageTitle(page,"Produtos","Cadastre e organize os itens do seu estoque.").pack(fill="x",pady=(0,22))
-        toolbar=ctk.CTkFrame(page,fg_color="transparent");toolbar.pack(fill="x",pady=(0,16)); self.product_search=ctk.CTkEntry(toolbar,placeholder_text="Buscar por nome ou categoria...",width=430,height=44,corner_radius=10,border_color=COLORS["border"],fg_color=COLORS["surface"]);self.product_search.pack(side="left");self.product_search.bind("<KeyRelease>",lambda e:self.refresh_products())
+        toolbar=ctk.CTkFrame(page,fg_color="transparent");toolbar.pack(fill="x",pady=(0,16)); self.product_search=ctk.CTkEntry(toolbar,placeholder_text="Buscar por produto, grupo ou variação...",width=430,height=44,corner_radius=10,border_color=COLORS["border"],fg_color=COLORS["surface"]);self.product_search.pack(side="left");self.product_search.bind("<KeyRelease>",lambda e:self.refresh_products())
         for text,name,cmd,color in (("Novo produto","plus",self.new_product,COLORS["accent"]),("Editar","edit",self.edit_product,COLORS["surface_alt"]),("Excluir","trash",self.delete_product,COLORS["surface_alt"])):
             ctk.CTkButton(toolbar,text=text,image=self.icons[name],height=44,corner_radius=10,fg_color=color,hover_color=COLORS["accent_hover"] if name=="plus" else COLORS["surface_hover"],text_color="#FFFFFF" if name=="plus" else COLORS["text"],command=cmd).pack(side="left",padx=(10,0))
-        card=Card(page);card.pack(fill="both",expand=True); self.product_tree=self.table(card,("name","category","unit","cost","minimum","stock"),("Produto","Categoria","Un.","Custo","Mínimo","Saldo"),(260,170,60,110,90,90));self.product_tree.pack(fill="both",expand=True,padx=20,pady=20);self.product_tree.bind("<Double-1>",lambda e:self.edit_product());self.configure_tables();return page
+        card=Card(page);card.pack(fill="both",expand=True); self.product_tree=self.table(card,("name","group","variant","category","unit","cost","minimum","stock"),("Produto","Grupo / modelo","Variação","Categoria","Un.","Custo","Mínimo","Saldo"),(180,165,155,125,50,90,75,75));self.product_tree.pack(fill="both",expand=True,padx=20,pady=20);self.product_tree.bind("<Double-1>",lambda e:self.edit_product());self.configure_tables();return page
 
     def refresh_products(self):
         if not hasattr(self,"product_tree"):return
         self.product_tree.delete(*self.product_tree.get_children()); search=self.product_search.get() if hasattr(self,"product_search") else ""
-        for p in self.db.products(search):self.product_tree.insert("","end",iid=str(p["id"]),values=(p["name"],p["category"]or"—",p["unit"],fmt_money(p["cost"]),fmt_number(p["minimum"]),fmt_number(p["stock"])))
+        for p in self.db.products(search):self.product_tree.insert("","end",iid=str(p["id"]),values=(p["name"],p["group_name"]or"—",p["variant"]or"—",p["category"]or"—",p["unit"],fmt_money(p["cost"]),fmt_number(p["minimum"]),fmt_number(p["stock"])))
 
     def selected_product(self):
         selected=self.product_tree.selection();return int(selected[0]) if selected else None
@@ -302,14 +440,14 @@ class EstoqueApp(ctk.CTk):
         page=ctk.CTkFrame(self.content,fg_color="transparent");PageTitle(page,"Estoque atual","Uma visão clara dos saldos e itens que precisam de atenção.").pack(fill="x",pady=(0,22));cards=ctk.CTkFrame(page,fg_color="transparent");cards.pack(fill="x",pady=(0,16));self.stock_cards=[]
         for title in ("Produtos","Unidades em estoque","Abaixo do mínimo","Valor estimado"):
             card=Card(cards,height=108);card.pack(side="left",fill="both",expand=True,padx=(0,12));card.pack_propagate(False);ctk.CTkLabel(card,text=title,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=18,pady=(17,3));label=ctk.CTkLabel(card,text="0",text_color=COLORS["text"],font=ctk.CTkFont("Inter",22,"bold"));label.pack(anchor="w",padx=18);self.stock_cards.append(label)
-        card=Card(page);card.pack(fill="both",expand=True);bar=ctk.CTkFrame(card,fg_color="transparent");bar.pack(fill="x",padx=20,pady=(18,8));ctk.CTkLabel(bar,text="Posição do estoque",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(side="left");self.stock_search=ctk.CTkEntry(bar,placeholder_text="Filtrar produtos...",width=260,height=38,corner_radius=9);self.stock_search.pack(side="right");self.stock_search.bind("<KeyRelease>",lambda e:self.refresh_stock())
-        self.stock_tree=self.table(card,("name","category","stock","unit","minimum","status","value"),("Produto","Categoria","Saldo atual","Un.","Mínimo","Situação","Valor estimado"),(230,150,100,55,80,115,125));self.stock_tree.pack(fill="both",expand=True,padx=20,pady=(8,20));self.configure_tables();return page
+        card=Card(page);card.pack(fill="both",expand=True);bar=ctk.CTkFrame(card,fg_color="transparent");bar.pack(fill="x",padx=20,pady=(18,8));ctk.CTkLabel(bar,text="Posição do estoque",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(side="left");self.stock_search=ctk.CTkEntry(bar,placeholder_text="Filtrar produto, grupo ou variação...",width=300,height=38,corner_radius=9);self.stock_search.pack(side="right");self.stock_search.bind("<KeyRelease>",lambda e:self.refresh_stock())
+        self.stock_tree=self.table(card,("group","name","variant","stock","unit","minimum","status","value"),("Grupo / modelo","Produto","Variação","Saldo atual","Un.","Mínimo","Situação","Valor estimado"),(165,175,155,95,50,75,110,120));self.stock_tree.pack(fill="both",expand=True,padx=20,pady=(8,20));self.configure_tables();return page
 
     def refresh_stock(self):
         if not hasattr(self,"stock_tree"):return
         items=self.db.products(self.stock_search.get() if hasattr(self,"stock_search") else "");self.stock_tree.delete(*self.stock_tree.get_children());units=low=value=0
         for p in items:
-            stock=float(p["stock"]);units+=stock;value+=stock*float(p["cost"]or 0);status="Sem estoque" if stock<=0 else "Estoque baixo" if stock<=float(p["minimum"]) else "Normal";low+=status!="Normal";self.stock_tree.insert("","end",values=(p["name"],p["category"]or"—",fmt_number(stock),p["unit"],fmt_number(p["minimum"]),status,fmt_money(stock*float(p["cost"]or 0))))
+            stock=float(p["stock"]);units+=stock;value+=stock*float(p["cost"]or 0);status="Sem estoque" if stock<=0 else "Estoque baixo" if stock<=float(p["minimum"]) else "Normal";low+=status!="Normal";self.stock_tree.insert("","end",values=(p["group_name"]or"Sem grupo",p["name"],p["variant"]or"—",fmt_number(stock),p["unit"],fmt_number(p["minimum"]),status,fmt_money(stock*float(p["cost"]or 0))))
         for label,text in zip(self.stock_cards,(str(len(items)),fmt_number(units),str(low),fmt_money(value))):label.configure(text=text)
 
     def movements_page(self):
@@ -333,7 +471,7 @@ class EstoqueApp(ctk.CTk):
         history=Card(body);history.grid(row=0,column=1,sticky="nsew");bar=ctk.CTkFrame(history,fg_color="transparent");bar.pack(fill="x",padx=20,pady=18);ctk.CTkLabel(bar,text="Histórico",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(side="left");self.history_filter=tk.StringVar(value="todos");ctk.CTkOptionMenu(bar,variable=self.history_filter,values=["todos","entrada","saida","ajuste","inventario"],width=150,fg_color=COLORS["surface_alt"],button_color=COLORS["surface_hover"],text_color=COLORS["text"],command=lambda _v:self.refresh_movements()).pack(side="right")
         self.history_tree=self.table(history,("date","product","type","quantity","stock","reason"),("Data","Produto","Operação","Alteração","Saldo","Observação"),(90,170,95,90,80,230));self.history_tree.pack(fill="both",expand=True,padx=20,pady=(0,20));self.configure_tables();return page
 
-    def product_map(self):return {f"{p['name']}  [{p['unit']}]":int(p["id"]) for p in self.db.products()}
+    def product_map(self):return {f"{product_label(p)}  [{p['unit']}]":int(p["id"]) for p in self.db.products()}
     def update_current_stock(self):
         pid=self.product_map().get(self.m_product.get());self.current_stock.configure(text=f"Saldo atual: {fmt_number(self.db.stock(pid))}" if pid else "Saldo atual: —")
     def register_movement(self):
@@ -345,7 +483,7 @@ class EstoqueApp(ctk.CTk):
     def refresh_movements(self):
         if not hasattr(self,"history_tree"):return
         mapping=self.product_map();self.m_product_combo.configure(values=list(mapping)or[""]);self.history_tree.delete(*self.history_tree.get_children());labels={"entrada":"Entrada","saida":"Saída","ajuste":"Ajuste","inventario":"Inventário"}
-        for m in self.db.movements(self.history_filter.get()):qty=float(m["quantity"]);self.history_tree.insert("","end",values=(datetime.strptime(m["movement_date"],"%Y-%m-%d").strftime("%d/%m/%y"),m["name"],labels[m["type"]],f"{'+' if qty>0 else ''}{fmt_number(qty)} {m['unit']}",f"{fmt_number(m['resulting_stock'])} {m['unit']}",m["reason"]))
+        for m in self.db.movements(self.history_filter.get()):qty=float(m["quantity"]);self.history_tree.insert("","end",values=(datetime.strptime(m["movement_date"],"%Y-%m-%d").strftime("%d/%m/%y"),product_label(m),labels[m["type"]],f"{'+' if qty>0 else ''}{fmt_number(qty)} {m['unit']}",f"{fmt_number(m['resulting_stock'])} {m['unit']}",m["reason"]))
 
     def settings_page(self):
         page=ctk.CTkFrame(self.content,fg_color="transparent");PageTitle(page,"Configurações","Personalize a aparência e proteja seus dados.").pack(fill="x",pady=(0,22))
@@ -372,7 +510,16 @@ class EstoqueApp(ctk.CTk):
     def clear_data(self):
         if messagebox.askyesno(APP_NAME,"Apagar definitivamente todos os dados?",icon="warning",parent=self):self.db.clear();self.refresh_all()
     def refresh_all(self):self.refresh_products();self.refresh_stock();self.refresh_movements()
-    def close(self):self.db.db.close();self.destroy()
+    def close(self):
+        try:
+            state = self.state()
+            if state in ("normal", "zoomed"): self._last_window_state = state
+            if state == "normal" and parse_window_geometry(self.geometry()): self._normal_geometry = self.geometry()
+            self.settings["window_state"] = self._last_window_state
+            self.settings["window_geometry"] = visible_window_geometry(self._normal_geometry, self.work_areas, self.minimum_width, self.minimum_height)
+            self.save_settings()
+        finally:
+            self.db.db.close(); self.destroy()
 
 
 if __name__=="__main__":
