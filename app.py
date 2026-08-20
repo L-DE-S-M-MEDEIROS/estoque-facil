@@ -23,7 +23,7 @@ from premium_widgets import MaskedDateEntry, TreeConfidenceOverlay, TreeRelative
 from cloud_sync import CloudSync, CloudSyncError
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -453,6 +453,13 @@ class Database:
     def stock(self, product_id: int) -> float:
         return float(self.db.execute("SELECT COALESCE(SUM(quantity),0) value FROM movements WHERE product_id=?", (product_id,)).fetchone()["value"])
 
+    def negative_stock_products(self) -> list[sqlite3.Row]:
+        return self.db.execute("""SELECT p.id,p.name,p.group_name,p.variant,p.unit,COALESCE(SUM(m.quantity),0) stock
+            FROM products p LEFT JOIN movements m ON m.product_id=p.id
+            GROUP BY p.id
+            HAVING COALESCE(SUM(m.quantity),0) < -0.0000001
+            ORDER BY p.name COLLATE NOCASE,p.group_name COLLATE NOCASE,p.variant COLLATE NOCASE""").fetchall()
+
     def _balance_before(self, product_id: int, movement_date: str, created_at: str, movement_id: int) -> float:
         return float(self.db.execute("""SELECT COALESCE(SUM(quantity),0) value FROM movements
             WHERE product_id=? AND id<>? AND (
@@ -484,8 +491,6 @@ class Database:
                 balance = target
             else:
                 balance += quantity
-            if balance < -.0000001:
-                raise ValueError(f"A alteração deixaria o estoque negativo em {datetime.strptime(row['movement_date'], '%Y-%m-%d').strftime('%d/%m/%y')}.")
             self.db.execute("UPDATE movements SET quantity=?,resulting_stock=? WHERE id=?", (quantity, balance, row["id"]))
 
     def add_movement_batch(self, operation: int | str, items: list[tuple[int, float]], movement_date: str, reason: str, performed_by: str) -> int:
@@ -1184,7 +1189,11 @@ class EstoqueApp(ctk.CTk):
             self.refresh_all()
 
     def stock_page(self):
-        page=ctk.CTkFrame(self.content,fg_color="transparent");PageTitle(page,"Estoque atual","Uma visão clara dos saldos e itens que precisam de atenção.").pack(fill="x",pady=(0,22));cards=ctk.CTkFrame(page,fg_color="transparent");cards.pack(fill="x",pady=(0,16));self.stock_cards=[]
+        page=ctk.CTkFrame(self.content,fg_color="transparent");PageTitle(page,"Estoque atual","Uma visão clara dos saldos e itens que precisam de atenção.").pack(fill="x",pady=(0,22))
+        self.negative_stock_alert=ctk.CTkFrame(page,fg_color=("#F6E7EA","#3A0711"),corner_radius=12,border_width=2,border_color=("#5A0B1A","#8F2433"))
+        ctk.CTkLabel(self.negative_stock_alert,text="ESTOQUE NEGATIVO",text_color=("#5A0B1A","#FFB3BE"),font=ctk.CTkFont("Inter",13,"bold")).pack(anchor="w",padx=18,pady=(14,3))
+        self.negative_stock_alert_text=ctk.CTkLabel(self.negative_stock_alert,text="",justify="left",anchor="w",wraplength=940,text_color=("#5A0B1A","#FFF1F3"),font=ctk.CTkFont("Inter",11,"bold"));self.negative_stock_alert_text.pack(fill="x",padx=18,pady=(0,14))
+        cards=ctk.CTkFrame(page,fg_color="transparent");cards.pack(fill="x",pady=(0,16));self.stock_cards_container=cards;self.stock_cards=[]
         for title in ("Produtos","Unidades em estoque","Abaixo do mínimo","Confiança baixa"):
             card=Card(cards,height=108);card.pack(side="left",fill="both",expand=True,padx=(0,12));card.pack_propagate(False);ctk.CTkLabel(card,text=title,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=18,pady=(17,3));label=ctk.CTkLabel(card,text="0",text_color=COLORS["text"],font=ctk.CTkFont("Inter",22,"bold"));label.pack(anchor="w",padx=18);self.stock_cards.append(label)
         card=Card(page);card.pack(fill="both",expand=True);bar=ctk.CTkFrame(card,fg_color="transparent");bar.pack(fill="x",padx=20,pady=(18,8));ctk.CTkLabel(bar,text="Posição do estoque",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(side="left");self.stock_search=ctk.CTkEntry(bar,placeholder_text="Filtrar produto ou grupo...",width=300,height=38,corner_radius=9);self.stock_search.pack(side="right");self.stock_search.bind("<KeyRelease>",lambda e:self.refresh_stock())
@@ -1195,11 +1204,17 @@ class EstoqueApp(ctk.CTk):
 
     def refresh_stock(self):
         if not hasattr(self,"stock_tree"):return
+        negative_products=self.db.negative_stock_products()
+        if negative_products:
+            negative_details="  •  ".join(f"{product_label(product)}: {fmt_number(product['stock'])} {product['unit']}" for product in negative_products)
+            self.negative_stock_alert_text.configure(text=f"{negative_details}\nVerifique as movimentações e registre uma entrada ou um ajuste positivo para corrigir o saldo.")
+            if not self.negative_stock_alert.winfo_manager():self.negative_stock_alert.pack(fill="x",pady=(0,16),before=self.stock_cards_container)
+        elif self.negative_stock_alert.winfo_manager():self.negative_stock_alert.pack_forget()
         items=self.db.products(self.stock_search.get() if hasattr(self,"stock_search") else "");self.stock_tree.delete(*self.stock_tree.get_children());units=low=low_confidence=0;scores={};quantities={};current_group=None;group_index=0
         for p in items:
             group=(p["group_name"]or"").strip()or"Sem grupo";group_key=group.casefold()
             if group_key!=current_group:group_index+=1;current_group=group_key;self.stock_tree.insert("","end",iid=f"group:{group_index}",values=(f"—  {group.upper()}  —","","",""),tags=("group_header",))
-            stock=float(p["stock"]);units+=stock;status="Sem estoque" if stock<=0 else "Estoque baixo" if stock<=float(p["minimum"]) else "Normal";low+=status!="Normal";trust=self.db.stock_confidence(int(p["id"]),stock);low_confidence+=trust["level"]=="Baixa";scores[int(p["id"])]=trust["score"];quantities[int(p["id"])]=(stock,fmt_number(stock));self.stock_tree.insert("","end",iid=str(p["id"]),values=("",p["name"],"",""))
+            stock=float(p["stock"]);units+=stock;status="Negativo" if stock<0 else "Sem estoque" if stock==0 else "Estoque baixo" if stock<=float(p["minimum"]) else "Normal";low+=status!="Normal";trust=self.db.stock_confidence(int(p["id"]),stock);low_confidence+=trust["level"]=="Baixa";scores[int(p["id"])]=trust["score"];quantities[int(p["id"])]=(stock,fmt_number(stock));self.stock_tree.insert("","end",iid=str(p["id"]),values=("",p["name"],"",""))
         self.stock_confidence_cells.set_scores(scores)
         self.stock_quantity_cells.set_quantities(quantities)
         for label,text in zip(self.stock_cards,(str(len(items)),fmt_number(units),str(low),str(low_confidence))):label.configure(text=text)
@@ -1472,7 +1487,13 @@ class EstoqueApp(ctk.CTk):
         if self.m_user.get() not in self.user_names():messagebox.showwarning(APP_NAME,"Cadastre e selecione um usuário responsável na aba Cadastro.",parent=self);return
         try:movement_date=self.m_date_entry.get_date();self.db.add_movement_batch(operation_id,[(item["product_id"],item["quantity"]) for item in self.movement_draft],movement_date.isoformat(),self.m_reason.get().strip(),self.m_user.get())
         except ValueError as error:messagebox.showwarning(APP_NAME,str(error)or"Revise a quantidade e a data.",parent=self);return
-        count=len(self.movement_draft);self.movement_draft.clear();self.draft_edit_index=None;self.m_quantity.set("");self.m_reason.set("");self.m_date_entry.set_date(date.today());self.refresh_draft();self.refresh_all();self.update_current_stock();messagebox.showinfo(APP_NAME,f"Movimentação registrada com {count} {'produto' if count==1 else 'produtos'}.",parent=self)
+        count=len(self.movement_draft);self.movement_draft.clear();self.draft_edit_index=None;self.m_quantity.set("");self.m_reason.set("");self.m_date_entry.set_date(date.today());self.refresh_draft();self.refresh_all();self.update_current_stock();self.show_movement_result(f"Movimentação registrada com {count} {'produto' if count==1 else 'produtos'}.")
+
+    def show_movement_result(self, success_message: str):
+        negative_products=self.db.negative_stock_products()
+        if not negative_products:messagebox.showinfo(APP_NAME,success_message,parent=self);return
+        details="\n".join(f"• {product_label(product)}: {fmt_number(product['stock'])} {product['unit']}" for product in negative_products)
+        messagebox.showwarning(APP_NAME,f"{success_message}\n\nATENÇÃO: ESTOQUE NEGATIVO\n{details}\n\nA alteração foi concluída sem bloquear o saldo negativo. Verifique o ocorrido e registre uma entrada ou um ajuste positivo para corrigir o saldo.",parent=self)
     def selected_movement(self):
         selected=self.history_tree.selection();return int(selected[0]) if selected else None
     def edit_movement(self):
@@ -1484,7 +1505,7 @@ class EstoqueApp(ctk.CTk):
         if not dialog.result:return
         try:self.db.update_movement(movement_id,**dialog.result)
         except ValueError as error:messagebox.showwarning(APP_NAME,str(error),parent=self);return
-        self.refresh_all();self.update_current_stock();messagebox.showinfo(APP_NAME,"Movimentação atualizada.",parent=self)
+        self.refresh_all();self.update_current_stock();self.show_movement_result("Movimentação atualizada.")
     def delete_movement(self):
         movement_id=self.selected_movement()
         if not movement_id:messagebox.showinfo(APP_NAME,"Selecione uma movimentação para excluir.",parent=self);return
@@ -1494,7 +1515,7 @@ class EstoqueApp(ctk.CTk):
         if not messagebox.askyesno(APP_NAME,f"Excluir a movimentação de {product_label(movement)} em {movement_date}?\n\nO saldo do produto será recalculado.",icon="warning",parent=self):return
         try:self.db.delete_movement(movement_id)
         except ValueError as error:messagebox.showwarning(APP_NAME,str(error),parent=self);return
-        self.refresh_all();self.update_current_stock();messagebox.showinfo(APP_NAME,"Movimentação excluída.",parent=self)
+        self.refresh_all();self.update_current_stock();self.show_movement_result("Movimentação excluída.")
     def refresh_movements(self):
         if not hasattr(self,"history_tree"):return
         self.refresh_user_controls()

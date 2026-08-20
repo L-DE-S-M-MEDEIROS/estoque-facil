@@ -7,7 +7,7 @@ import unittest
 
 import app
 from cloud_sync import CloudSync
-from premium_widgets import count_age_color
+from premium_widgets import count_age_color, stock_quantity_color
 
 
 class InventoryDatabaseTests(unittest.TestCase):
@@ -102,6 +102,23 @@ class InventoryDatabaseTests(unittest.TestCase):
         batch_id = self.db.add_movement_batch("saida", [(product_id, 3)], date.today().isoformat(), "Venda", "Teste")
         self.assertGreater(batch_id, 0)
         self.assertEqual(self.db.stock(product_id), 7)
+
+    def test_outgoing_movement_can_leave_stock_negative_and_reports_product(self):
+        product_id = self.create_product()
+        self.db.add_movement_batch("saida", [(product_id, 3)], date.today().isoformat(), "Venda antecipada", "Teste")
+
+        self.assertEqual(self.db.stock(product_id), -3)
+        negative_products = self.db.negative_stock_products()
+        self.assertEqual(len(negative_products), 1)
+        self.assertEqual(negative_products[0]["id"], product_id)
+        self.assertEqual(negative_products[0]["stock"], -3)
+
+        self.db.add_movement_batch("entrada", [(product_id, 3)], date.today().isoformat(), "Correção", "Teste")
+        self.assertEqual(self.db.stock(product_id), 0)
+        self.assertEqual(self.db.negative_stock_products(), [])
+
+    def test_negative_stock_uses_dark_wine_color(self):
+        self.assertEqual(stock_quantity_color(-1), ("#5A0B1A", "#5A0B1A"))
 
     def test_cloud_payload_contains_inventory_and_photo(self):
         photo = app.data_dir() / "fotos" / "produto.png"

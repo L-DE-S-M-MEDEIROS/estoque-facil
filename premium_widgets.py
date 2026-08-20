@@ -26,6 +26,8 @@ STOCK_QUANTITY_TIERS = (
     (0, ("#8F2433", "#FF5D6C")),
 )
 
+NEGATIVE_STOCK_WINE = ("#5A0B1A", "#5A0B1A")
+
 COUNT_AGE_TIERS = (
     (61, ("#8F2433", "#FF5D6C")),
     (31, ("#D45A32", "#FF8A5C")),
@@ -43,6 +45,8 @@ def confidence_tier(score: int) -> tuple[str, tuple[str, str]]:
 
 def stock_quantity_color(quantity: float) -> tuple[str, str]:
     """Return the requested theme-aware stock color for a quantity."""
+    if float(quantity) < 0:
+        return NEGATIVE_STOCK_WINE
     value = max(0.0, float(quantity))
     return next(color for minimum, color in STOCK_QUANTITY_TIERS if value >= minimum)
 
@@ -202,11 +206,12 @@ class TreeStockOverlay(TreeConfidenceOverlay):
             if not bounds:
                 continue
             x, y, cell_width, cell_height = bounds
+            negative = quantity < 0
             label = tk.Label(
                 self.tree,
                 text=display,
-                foreground=_appearance_color(stock_quantity_color(quantity)),
-                background=selected_background if item_id in selected else normal_background,
+                foreground="#FFFFFF" if negative else _appearance_color(stock_quantity_color(quantity)),
+                background=_appearance_color(NEGATIVE_STOCK_WINE) if negative else selected_background if item_id in selected else normal_background,
                 borderwidth=0,
                 highlightthickness=0,
                 font=("Inter", 11, "bold"),

@@ -22,6 +22,7 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Foto opcional, categoria, unidade e estoque mínimo
 - Aba **Estoque atual** com saldo, situação e confiança; a última contagem fica somente na aba **Contagem**
 - Estoque atual agrupado com separadores visuais, produtos em ordem alfabética e saldos coloridos por quantidade
+- Estoque negativo permitido, com aviso persistente por produto e saldo destacado em vinho escuro
 - Aba **Contagem** no formato de check-in da planilha, com quantidade física, data e responsável
 - Última contagem em tempo relativo e colorido: hoje, dias, semanas, meses ou anos atrás
 - Aba **Cadastro** com gerenciadores separados e ilustrados para Usuários, Operações, Grupos e Produtos
