@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +56,7 @@ def sanitize_preferences(values: dict[str, Any]) -> dict[str, Any]:
     clean["theme"] = values.get("theme") if values.get("theme") in ("Light", "Dark") else "Light"
     clean["window_state"] = values.get("window_state") if values.get("window_state") in ("normal", "zoomed") else "zoomed"
     clean["window_geometry"] = _text(values.get("window_geometry"), maximum=80)
-    clean["last_page"] = values.get("last_page") if values.get("last_page") in ("stock", "movements", "count", "registration", "settings") else "stock"
+    clean["last_page"] = values.get("last_page") if values.get("last_page") in ("stock", "movements", "simulation", "count", "registration", "settings") else "stock"
     clean["counter_name"] = _text(values.get("counter_name"), maximum=100)
     clean["stock_search"] = _text(values.get("stock_search"))
     clean["count_search"] = _text(values.get("count_search"))
@@ -103,3 +104,47 @@ class LocalCloudSession:
         self.values.clear()
         self.values.update(clean)
         atomic_write_json(self.path, {"format": 1, "session": self.values})
+
+
+def sanitize_simulation(values: dict[str, Any]) -> dict[str, Any]:
+    """Accept only a local operation and positive product quantities."""
+
+    operation = values.get("operation") if values.get("operation") in ("entrada", "saida") else "saida"
+    items: list[dict[str, int | float]] = []
+    positions: dict[int, int] = {}
+    source = values.get("items") if isinstance(values.get("items"), list) else []
+    for raw_item in source[:1000]:
+        if not isinstance(raw_item, dict):
+            continue
+        try:
+            product_id = int(raw_item.get("product_id", 0))
+            quantity = float(raw_item.get("quantity", 0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if product_id <= 0 or quantity <= 0 or not math.isfinite(quantity):
+            continue
+        item = {"product_id": product_id, "quantity": quantity}
+        if product_id in positions:
+            items[positions[product_id]] = item
+        else:
+            positions[product_id] = len(items)
+            items.append(item)
+    return {"operation": operation, "items": items}
+
+
+class LocalSimulationDraft:
+    """Persist a device-local simulation without mixing it into cloud data."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        stored = read_json_object(path)
+        if isinstance(stored.get("simulation"), dict):
+            stored = stored["simulation"]
+        self.values = sanitize_simulation(stored)
+        self.save()
+
+    def save(self) -> None:
+        clean = sanitize_simulation(self.values)
+        self.values.clear()
+        self.values.update(clean)
+        atomic_write_json(self.path, {"format": 1, "simulation": self.values})

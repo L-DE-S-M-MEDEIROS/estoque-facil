@@ -7,7 +7,7 @@ import unittest
 
 import app
 from cloud_sync import CloudSync
-from local_state import LocalCloudSession, LocalPreferences, read_json_object
+from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
 from premium_widgets import count_age_color, stock_quantity_color
 
 
@@ -121,6 +121,20 @@ class InventoryDatabaseTests(unittest.TestCase):
     def test_negative_stock_uses_dark_wine_color(self):
         self.assertEqual(stock_quantity_color(-1), ("#5A0B1A", "#5A0B1A"))
 
+    def test_simulation_projects_entry_and_exit_without_changing_inventory(self):
+        product_id = self.create_product()
+        self.db.add_movement(product_id, "inventario", 10, date.today().isoformat(), "Inicial", "Teste")
+
+        self.assertEqual(app.simulated_stock(self.db.stock(product_id), 4, "entrada"), 14)
+        self.assertEqual(app.simulated_stock(self.db.stock(product_id), 12, "saida"), -2)
+        self.assertEqual(self.db.stock(product_id), 10)
+
+    def test_simulation_rejects_invalid_quantity_and_operation(self):
+        with self.assertRaisesRegex(ValueError, "maior que zero"):
+            app.simulated_stock(10, 0, "saida")
+        with self.assertRaisesRegex(ValueError, "inválida"):
+            app.simulated_stock(10, 2, "ajuste")
+
     def test_cloud_payload_contains_inventory_and_photo(self):
         photo = app.data_dir() / "fotos" / "produto.png"
         photo.write_bytes(b"imagem")
@@ -128,12 +142,16 @@ class InventoryDatabaseTests(unittest.TestCase):
         product = dict(self.db.product(product_id))
         product["photo"] = str(photo)
         self.db.save_product(product, product_id)
+        draft = LocalSimulationDraft(app.data_dir() / "simulation-draft.json")
+        draft.values = {"operation": "saida", "items": [{"product_id": product_id, "quantity": 99}]}
+        draft.save()
         sync = CloudSync(app.data_dir(), {})
         payload = sync.export_payload(self.db.db)
         self.assertEqual(payload["format"], 1)
         self.assertEqual(set(payload), {"format", "app", "exported_at", "tables", "photos"})
         self.assertEqual(payload["tables"]["products"][0]["photo"], "produto.png")
         self.assertIn("produto.png", payload["photos"])
+        self.assertNotIn("simulation", payload)
 
 
 class LocalStateTests(unittest.TestCase):
@@ -187,6 +205,32 @@ class LocalStateTests(unittest.TestCase):
 
         restored = LocalCloudSession(path, legacy)
         self.assertEqual(restored.values, {})
+
+    def test_simulation_draft_is_local_persistent_and_sanitized(self):
+        path = self.folder / "simulation-draft.json"
+        draft = LocalSimulationDraft(path)
+        draft.values = {
+            "operation": "saida",
+            "items": [
+                {"product_id": 7, "quantity": 12},
+                {"product_id": 8, "quantity": -1},
+                {"product_id": "inválido", "quantity": 3},
+                {"product_id": 7, "quantity": 15},
+            ],
+        }
+        draft.save()
+
+        restored = LocalSimulationDraft(path)
+        self.assertEqual(restored.values, {"operation": "saida", "items": [{"product_id": 7, "quantity": 15.0}]})
+        self.assertEqual(read_json_object(path)["simulation"], restored.values)
+
+    def test_simulation_can_be_restored_as_last_local_page(self):
+        path = self.folder / "ui-preferences.json"
+        preferences = LocalPreferences(path)
+        preferences.values["last_page"] = "simulation"
+        preferences.save()
+
+        self.assertEqual(LocalPreferences(path).values["last_page"], "simulation")
 
 
 if __name__ == "__main__":

@@ -64,6 +64,13 @@ def _draw_icon(name: str, color: str, size: int = 256) -> Image.Image:
         draw.line((p(7), p(9), p(17), p(9)), **line)
         draw.line((p(7), p(15), p(14), p(15)), **line)
         draw.line((p(17), p(13), p(17), p(17)), **line)
+    elif name == "simulation":
+        draw.rounded_rectangle((p(4), p(3), p(20), p(21)), radius=p(2), outline=color, width=width)
+        draw.line((p(8), p(8), p(16), p(8)), **line)
+        draw.line((p(8), p(12), p(16), p(12)), **line)
+        draw.line((p(8), p(16), p(12), p(16)), **line)
+        draw.line((p(16), p(14), p(16), p(18)), **line)
+        draw.line((p(14), p(16), p(18), p(16)), **line)
     elif name == "group":
         draw.rounded_rectangle((p(3), p(4), p(21), p(10)), radius=p(1.5), outline=color, width=width)
         draw.rounded_rectangle((p(3), p(13), p(21), p(19)), radius=p(1.5), outline=color, width=width)
