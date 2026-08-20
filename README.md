@@ -10,6 +10,10 @@ Aplicativo desktop nativo para Windows, desenvolvido em Python com Tkinter e SQL
 - Aba **Estoque atual** com saldo, situação e confiança; a última contagem fica somente na aba **Contagem**
 - Estoque atual agrupado com separadores visuais, produtos em ordem alfabética e saldos coloridos por quantidade
 - Aba **Contagem** no formato de check-in da planilha, com quantidade física, data e responsável
+- Aba **Cadastro** com gerenciadores separados e ilustrados para Usuários, Operações e Produtos
+- Operações personalizadas configuráveis para somar ou retirar unidades do estoque
+- Movimentações em lote no estilo carrinho: vários produtos, uma operação, data, observação e usuário responsável
+- Revisão, edição e remoção dos itens antes de salvar o conjunto
 - Índice de confiança calculado pelos dias, frequência e volume movimentado desde a última contagem
 - Medidores de confiança: vermelho de 0% a 40%, amarelo de 41% a 60%, verde de 61% a 89% e azul de 90% a 100%
 - Mini velocímetros substituem os percentuais nas colunas de confiança das tabelas

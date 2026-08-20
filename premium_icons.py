@@ -59,6 +59,19 @@ def _draw_icon(name: str, color: str, size: int = 256) -> Image.Image:
         draw.line((p(16), p(5), p(19), p(8), p(16), p(11)), **line)
         draw.line((p(20), p(16), p(5), p(16)), **line)
         draw.line((p(8), p(13), p(5), p(16), p(8), p(19)), **line)
+    elif name == "operation":
+        draw.rounded_rectangle((p(3), p(4), p(21), p(20)), radius=p(2), outline=color, width=width)
+        draw.line((p(7), p(9), p(17), p(9)), **line)
+        draw.line((p(7), p(15), p(14), p(15)), **line)
+        draw.line((p(17), p(13), p(17), p(17)), **line)
+    elif name == "user":
+        draw.ellipse((p(8), p(3), p(16), p(11)), outline=color, width=width)
+        draw.arc((p(4), p(10), p(20), p(23)), 190, 350, fill=color, width=width)
+    elif name == "registration":
+        for x, y in ((4, 4), (14, 4), (4, 14)):
+            draw.rounded_rectangle((p(x), p(y), p(x+6), p(y+6)), radius=p(1.3), outline=color, width=width)
+        draw.line((p(17), p(14), p(17), p(22)), **line)
+        draw.line((p(13), p(18), p(21), p(18)), **line)
     elif name == "count":
         draw.rounded_rectangle((p(5), p(4), p(20), p(22)), radius=p(2), outline=color, width=width)
         draw.rounded_rectangle((p(9), p(2), p(16), p(7)), radius=p(1.5), outline=color, width=width)

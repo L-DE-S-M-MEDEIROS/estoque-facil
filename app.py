@@ -21,7 +21,7 @@ from premium_icons import app_icon, brand_mark, icon
 from premium_widgets import MaskedDateEntry, TreeConfidenceOverlay, TreeStockOverlay, confidence_tier
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.10.0"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -167,12 +167,34 @@ class Database:
                 category TEXT NOT NULL DEFAULT '', unit TEXT NOT NULL DEFAULT 'un',
                 cost REAL, minimum REAL NOT NULL DEFAULT 0, photo TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS operation_types(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                effect TEXT NOT NULL CHECK(effect IN ('positive','negative','set')),
+                legacy_type TEXT UNIQUE,
+                active INTEGER NOT NULL DEFAULT 1,
+                protected INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS users(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS movement_batches(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                operation_id INTEGER NOT NULL,
+                movement_date TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                performed_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(operation_id) REFERENCES operation_types(id));
             CREATE TABLE IF NOT EXISTS movements(
                 id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL,
                 type TEXT NOT NULL CHECK(type IN ('entrada','saida','ajuste','inventario')),
                 quantity REAL NOT NULL, resulting_stock REAL NOT NULL, informed_quantity REAL,
                 movement_date TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
                 checked_by TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                operation_id INTEGER, batch_id INTEGER,
                 FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT);
             CREATE INDEX IF NOT EXISTS idx_movements_product ON movements(product_id);
             CREATE INDEX IF NOT EXISTS idx_movements_date ON movements(movement_date DESC);
@@ -188,7 +210,121 @@ class Database:
         if "informed_quantity" not in movement_columns:
             self.db.execute("ALTER TABLE movements ADD COLUMN informed_quantity REAL")
             self.db.execute("UPDATE movements SET informed_quantity=resulting_stock WHERE type IN ('ajuste','inventario')")
+        if "operation_id" not in movement_columns:
+            self.db.execute("ALTER TABLE movements ADD COLUMN operation_id INTEGER REFERENCES operation_types(id)")
+        if "batch_id" not in movement_columns:
+            self.db.execute("ALTER TABLE movements ADD COLUMN batch_id INTEGER REFERENCES movement_batches(id)")
+        created_at = datetime.now().isoformat(timespec="seconds")
+        for name, effect, legacy_type in (
+            ("Entrada", "positive", "entrada"),
+            ("Saída", "negative", "saida"),
+            ("Ajuste", "set", "ajuste"),
+            ("Inventário", "set", "inventario"),
+        ):
+            self.db.execute("""INSERT OR IGNORE INTO operation_types(name,effect,legacy_type,active,protected,created_at)
+                VALUES(?,?,?,1,1,?)""", (name, effect, legacy_type, created_at))
+        self.db.execute("""UPDATE movements SET operation_id=(
+            SELECT id FROM operation_types WHERE legacy_type=movements.type
+        ) WHERE operation_id IS NULL""")
         self.db.commit()
+
+    def operations(self, include_inactive: bool = False, custom_only: bool = False) -> list[sqlite3.Row]:
+        conditions = []
+        if not include_inactive:
+            conditions.append("active=1")
+        if custom_only:
+            conditions.append("protected=0")
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        return self.db.execute(f"""SELECT * FROM operation_types {where} ORDER BY
+            protected DESC,
+            CASE legacy_type WHEN 'entrada' THEN 1 WHEN 'saida' THEN 2 WHEN 'ajuste' THEN 3 WHEN 'inventario' THEN 4 ELSE 5 END,
+            name COLLATE NOCASE""").fetchall()
+
+    def operation(self, operation: int | str) -> sqlite3.Row | None:
+        if isinstance(operation, int) or str(operation).isdigit():
+            return self.db.execute("SELECT * FROM operation_types WHERE id=?", (int(operation),)).fetchone()
+        return self.db.execute("SELECT * FROM operation_types WHERE legacy_type=? OR name=? COLLATE NOCASE", (str(operation), str(operation))).fetchone()
+
+    def save_operation(self, name: str, effect: str, operation_id: int | None = None) -> int:
+        clean_name = " ".join(name.strip().split())
+        if not clean_name:
+            raise ValueError("Informe o nome da operação.")
+        if len(clean_name) > 40:
+            raise ValueError("O nome da operação pode ter no máximo 40 caracteres.")
+        if effect not in ("positive", "negative"):
+            raise ValueError("Escolha se a operação soma ou retira do estoque.")
+        try:
+            with self.db:
+                if operation_id:
+                    current = self.operation(operation_id)
+                    if not current or current["protected"]:
+                        raise ValueError("Essa operação padrão não pode ser alterada.")
+                    self.db.execute("UPDATE operation_types SET name=?,effect=?,active=1 WHERE id=?", (clean_name, effect, operation_id))
+                    return operation_id
+                archived = self.db.execute("SELECT * FROM operation_types WHERE name=? COLLATE NOCASE", (clean_name,)).fetchone()
+                if archived:
+                    if archived["active"] or archived["protected"]:
+                        raise ValueError("Já existe uma operação com esse nome.")
+                    self.db.execute("UPDATE operation_types SET effect=?,active=1 WHERE id=?", (effect, archived["id"]))
+                    return int(archived["id"])
+                cursor = self.db.execute("""INSERT INTO operation_types(name,effect,active,protected,created_at)
+                    VALUES(?,?,1,0,?)""", (clean_name, effect, datetime.now().isoformat(timespec="seconds")))
+                return int(cursor.lastrowid)
+        except sqlite3.IntegrityError as error:
+            raise ValueError("Já existe uma operação com esse nome.") from error
+
+    def delete_operation(self, operation_id: int) -> None:
+        operation = self.operation(operation_id)
+        if not operation or operation["protected"]:
+            raise ValueError("Essa operação padrão não pode ser apagada.")
+        with self.db:
+            self.db.execute("UPDATE operation_types SET active=0 WHERE id=?", (operation_id,))
+
+    def _resolve_operation(self, operation: int | str) -> tuple[sqlite3.Row, str]:
+        definition = self.operation(operation)
+        if not definition:
+            raise ValueError("Selecione uma operação válida.")
+        kind = definition["legacy_type"]
+        if not kind:
+            kind = "entrada" if definition["effect"] == "positive" else "saida"
+        return definition, kind
+
+    def users(self, include_inactive: bool = False) -> list[sqlite3.Row]:
+        where = "" if include_inactive else "WHERE active=1"
+        return self.db.execute(f"SELECT * FROM users {where} ORDER BY name COLLATE NOCASE").fetchall()
+
+    def user(self, user_id: int) -> sqlite3.Row | None:
+        return self.db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+
+    def save_user(self, name: str, user_id: int | None = None) -> int:
+        clean_name = " ".join(name.strip().split())
+        if not clean_name:
+            raise ValueError("Informe o nome do usuário.")
+        if len(clean_name) > 60:
+            raise ValueError("O nome do usuário pode ter no máximo 60 caracteres.")
+        try:
+            with self.db:
+                if user_id:
+                    if not self.user(user_id):
+                        raise ValueError("Esse usuário não existe mais.")
+                    self.db.execute("UPDATE users SET name=?,active=1 WHERE id=?", (clean_name, user_id))
+                    return user_id
+                archived = self.db.execute("SELECT * FROM users WHERE name=? COLLATE NOCASE", (clean_name,)).fetchone()
+                if archived:
+                    if archived["active"]:
+                        raise ValueError("Já existe um usuário com esse nome.")
+                    self.db.execute("UPDATE users SET active=1 WHERE id=?", (archived["id"],))
+                    return int(archived["id"])
+                cursor = self.db.execute("INSERT INTO users(name,active,created_at) VALUES(?,1,?)", (clean_name, datetime.now().isoformat(timespec="seconds")))
+                return int(cursor.lastrowid)
+        except sqlite3.IntegrityError as error:
+            raise ValueError("Já existe um usuário com esse nome.") from error
+
+    def delete_user(self, user_id: int) -> None:
+        if not self.user(user_id):
+            raise ValueError("Esse usuário não existe mais.")
+        with self.db:
+            self.db.execute("UPDATE users SET active=0 WHERE id=?", (user_id,))
 
     def products(self, search: str = "") -> list[sqlite3.Row]:
         term = f"%{search.strip()}%"
@@ -257,14 +393,39 @@ class Database:
                 raise ValueError(f"A alteração deixaria o estoque negativo em {datetime.strptime(row['movement_date'], '%Y-%m-%d').strftime('%d/%m/%y')}.")
             self.db.execute("UPDATE movements SET quantity=?,resulting_stock=? WHERE id=?", (quantity, balance, row["id"]))
 
-    def add_movement(self, product_id: int, kind: str, informed: float, movement_date: str, reason: str, checked_by: str = "") -> None:
+    def add_movement_batch(self, operation: int | str, items: list[tuple[int, float]], movement_date: str, reason: str, performed_by: str) -> int:
+        definition, kind = self._resolve_operation(operation)
+        if not definition["active"]:
+            raise ValueError("Essa operação foi apagada. Escolha outra operação.")
+        if not items:
+            raise ValueError("Adicione pelo menos um produto à movimentação.")
+        responsible = " ".join(performed_by.strip().split())
+        if not responsible:
+            raise ValueError("Informe o usuário responsável pela movimentação.")
+        unique_products: set[int] = set()
+        for product_id, _informed in items:
+            if product_id in unique_products:
+                raise ValueError("O mesmo produto não pode aparecer duas vezes no conjunto.")
+            unique_products.add(product_id)
         created_at = datetime.now().isoformat(timespec="microseconds")
-        balance_before = self._balance_before(product_id, movement_date, created_at, 2**63-1)
-        delta = self._movement_delta(kind, informed, balance_before)
-        informed_quantity = informed if kind in ("ajuste", "inventario") else None
         with self.db:
-            self.db.execute("INSERT INTO movements(product_id,type,quantity,resulting_stock,informed_quantity,movement_date,reason,checked_by,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (product_id, kind, delta, balance_before + delta, informed_quantity, movement_date, reason or ("Contagem de inventário" if kind == "inventario" else "Sem observação"), checked_by.strip(), created_at))
-            self._recalculate_product(product_id)
+            batch = self.db.execute("""INSERT INTO movement_batches(operation_id,movement_date,reason,performed_by,created_at)
+                VALUES(?,?,?,?,?)""", (definition["id"], movement_date, reason.strip(), responsible, created_at))
+            batch_id = int(batch.lastrowid)
+            for index, (product_id, informed) in enumerate(items):
+                item_created_at = f"{created_at}-{index:04d}"
+                balance_before = self._balance_before(product_id, movement_date, item_created_at, 2**63-1)
+                delta = self._movement_delta(kind, informed, balance_before)
+                informed_quantity = informed if kind in ("ajuste", "inventario") else None
+                self.db.execute("""INSERT INTO movements(product_id,type,quantity,resulting_stock,informed_quantity,movement_date,reason,checked_by,created_at,operation_id,batch_id)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (product_id, kind, delta, balance_before + delta, informed_quantity, movement_date, reason or ("Contagem de inventário" if kind == "inventario" else "Sem observação"), responsible, item_created_at, definition["id"], batch_id))
+            for product_id in unique_products:
+                self._recalculate_product(product_id)
+        return batch_id
+
+    def add_movement(self, product_id: int, operation: int | str, informed: float, movement_date: str, reason: str, checked_by: str = "") -> None:
+        responsible = checked_by.strip() or "Contagem"
+        self.add_movement_batch(operation, [(product_id, informed)], movement_date, reason, responsible)
 
     def stock_confidence(self, product_id: int, current_stock: float | None = None, as_of: date | None = None) -> dict:
         """Estimate balance reliability from age and activity since the last physical count."""
@@ -308,20 +469,26 @@ class Database:
         }
 
     def movement(self, movement_id: int) -> sqlite3.Row | None:
-        return self.db.execute("""SELECT m.*,p.name,p.group_name,p.variant,p.unit FROM movements m
-            JOIN products p ON p.id=m.product_id WHERE m.id=?""", (movement_id,)).fetchone()
+        return self.db.execute("""SELECT m.*,p.name,p.group_name,p.variant,p.unit,
+            COALESCE(o.name,CASE m.type WHEN 'entrada' THEN 'Entrada' WHEN 'saida' THEN 'Saída' WHEN 'ajuste' THEN 'Ajuste' ELSE 'Inventário' END) operation_name
+            FROM movements m JOIN products p ON p.id=m.product_id
+            LEFT JOIN operation_types o ON o.id=m.operation_id WHERE m.id=?""", (movement_id,)).fetchone()
 
-    def update_movement(self, movement_id: int, product_id: int, kind: str, informed: float, movement_date: str, reason: str) -> None:
+    def update_movement(self, movement_id: int, product_id: int, operation: int | str, informed: float, movement_date: str, reason: str, checked_by: str) -> None:
         previous = self.movement(movement_id)
         if not previous:
             raise ValueError("A movimentação não existe mais.")
+        definition, kind = self._resolve_operation(operation)
         balance_before = self._balance_before(product_id, movement_date, previous["created_at"], movement_id)
         delta = self._movement_delta(kind, informed, balance_before)
         informed_quantity = informed if kind in ("ajuste", "inventario") else None
         affected = {int(previous["product_id"]), product_id}
         with self.db:
-            self.db.execute("""UPDATE movements SET product_id=?,type=?,quantity=?,informed_quantity=?,movement_date=?,reason=?
-                WHERE id=?""", (product_id, kind, delta, informed_quantity, movement_date, reason or ("Contagem de inventário" if kind == "inventario" else "Sem observação"), movement_id))
+            responsible = " ".join(checked_by.strip().split())
+            if not responsible:
+                raise ValueError("Informe o usuário responsável pela movimentação.")
+            self.db.execute("""UPDATE movements SET product_id=?,type=?,quantity=?,informed_quantity=?,movement_date=?,reason=?,operation_id=?,checked_by=?
+                WHERE id=?""", (product_id, kind, delta, informed_quantity, movement_date, reason or ("Contagem de inventário" if kind == "inventario" else "Sem observação"), definition["id"], responsible, movement_id))
             for affected_product in affected:
                 self._recalculate_product(affected_product)
 
@@ -332,10 +499,15 @@ class Database:
         with self.db:
             self.db.execute("DELETE FROM movements WHERE id=?", (movement_id,))
             self._recalculate_product(int(movement["product_id"]))
+            if movement["batch_id"]:
+                self.db.execute("DELETE FROM movement_batches WHERE id=? AND NOT EXISTS(SELECT 1 FROM movements WHERE batch_id=?)", (movement["batch_id"], movement["batch_id"]))
 
-    def movements(self, kind: str = "todos") -> list[sqlite3.Row]:
-        where, args = ("", ()) if kind == "todos" else ("WHERE m.type=?", (kind,))
-        return self.db.execute(f"""SELECT m.*,p.name,p.group_name,p.variant,p.unit FROM movements m JOIN products p ON p.id=m.product_id
+    def movements(self, operation: int | str = "todos") -> list[sqlite3.Row]:
+        where, args = ("", ()) if operation == "todos" else ("WHERE m.operation_id=?", (int(operation),))
+        return self.db.execute(f"""SELECT m.*,p.name,p.group_name,p.variant,p.unit,
+            COALESCE(o.name,CASE m.type WHEN 'entrada' THEN 'Entrada' WHEN 'saida' THEN 'Saída' WHEN 'ajuste' THEN 'Ajuste' ELSE 'Inventário' END) operation_name
+            FROM movements m JOIN products p ON p.id=m.product_id
+            LEFT JOIN operation_types o ON o.id=m.operation_id
             {where} ORDER BY m.movement_date DESC,m.created_at DESC LIMIT 500""", args).fetchall()
 
     def backup(self, target: Path) -> None:
@@ -345,7 +517,7 @@ class Database:
         self.db.close(); shutil.copy2(source, self.path); self.__init__()
 
     def clear(self) -> None:
-        self.db.execute("DELETE FROM movements"); self.db.execute("DELETE FROM products"); self.db.commit()
+        self.db.execute("DELETE FROM movements"); self.db.execute("DELETE FROM movement_batches"); self.db.execute("DELETE FROM products"); self.db.commit()
 
 
 class Card(ctk.CTkFrame):
@@ -419,14 +591,194 @@ class ProductDialog(ctk.CTkToplevel):
         self.result = {"name": name, "category": self.category.get().strip(), "group_name": self.group_name.get().strip(), "variant": self.variant.get().strip(), "unit": self.unit.get(), "minimum": minimum, "photo": photo, "notes": self.notes.get("1.0", "end").strip()}; self.destroy()
 
 
+class UserManagerDialog(ctk.CTkToplevel):
+    def __init__(self, parent: "EstoqueApp"):
+        super().__init__(parent, fg_color=COLORS["background"])
+        self.parent = parent; self.selected_id: int | None = None
+        self.title("Gerenciar usuários")
+        scale = parent.ui_scale; width, height = round(650*scale), round(470*scale)
+        self.geometry(f"{width}x{height}+{parent.winfo_x()+110}+{parent.winfo_y()+90}")
+        self.minsize(round(580*scale), round(420*scale)); self.transient(parent); self.grab_set()
+        self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(1, weight=1)
+        header=ctk.CTkFrame(self,fg_color=COLORS["surface"],corner_radius=0);header.grid(row=0,column=0,sticky="ew")
+        ctk.CTkLabel(header,text="USUÁRIOS",text_color=COLORS["accent"],font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=28,pady=(20,2))
+        ctk.CTkLabel(header,text="Cadastro de usuários",text_color=COLORS["text"],font=ctk.CTkFont("Inter",23,"bold")).pack(anchor="w",padx=28)
+        ctk.CTkLabel(header,text="Esses nomes ficam disponíveis para identificar quem realizou uma movimentação.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=28,pady=(5,20))
+        content=ctk.CTkFrame(self,fg_color="transparent");content.grid(row=1,column=0,sticky="nsew",padx=24,pady=22);content.grid_columnconfigure(0,weight=3);content.grid_columnconfigure(1,weight=2);content.grid_rowconfigure(0,weight=1)
+        listing=Card(content);listing.grid(row=0,column=0,sticky="nsew",padx=(0,10))
+        self.tree=ttk.Treeview(listing,columns=("name",),show="headings",selectmode="browse");self.tree.heading("name",text="Usuário",anchor="center");self.tree.column("name",width=260,anchor="center");self.tree.pack(fill="both",expand=True,padx=18,pady=18);self.tree.bind("<<TreeviewSelect>>",self.select_user)
+        editor=Card(content);editor.grid(row=0,column=1,sticky="nsew",padx=(10,0))
+        ctk.CTkLabel(editor,text="Nome do usuário",text_color=COLORS["text"],font=ctk.CTkFont("Inter",14,"bold")).pack(anchor="w",padx=18,pady=(20,8))
+        self.name=tk.StringVar();self.name_entry=ctk.CTkEntry(editor,textvariable=self.name,height=40,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface"]);self.name_entry.pack(fill="x",padx=18,pady=(0,18))
+        actions=ctk.CTkFrame(editor,fg_color="transparent");actions.pack(fill="x",padx=18)
+        ctk.CTkButton(actions,text="Novo",width=78,height=38,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.new_user).pack(side="left")
+        ctk.CTkButton(actions,text="Salvar",height=38,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.save_user).pack(side="right",fill="x",expand=True,padx=(8,0))
+        ctk.CTkButton(editor,text="Apagar usuário selecionado",height=36,fg_color="transparent",hover_color=COLORS["surface_hover"],text_color=COLORS["danger"],command=self.delete_user).pack(fill="x",padx=18,pady=(12,18))
+        self.refresh();self.name_entry.focus_set()
+
+    def refresh(self):
+        self.tree.delete(*self.tree.get_children())
+        for user in self.parent.db.users():self.tree.insert("","end",iid=str(user["id"]),values=(user["name"],))
+    def new_user(self):
+        self.selected_id=None;self.tree.selection_remove(self.tree.selection());self.name.set("");self.name_entry.focus_set()
+    def select_user(self,_event=None):
+        selected=self.tree.selection()
+        if selected:
+            user=self.parent.db.user(int(selected[0]));self.selected_id=int(selected[0]);self.name.set(user["name"] if user else "")
+    def save_user(self):
+        try:saved_id=self.parent.db.save_user(self.name.get(),self.selected_id)
+        except ValueError as error:messagebox.showwarning(APP_NAME,str(error),parent=self);return
+        self.refresh();self.selected_id=saved_id;self.tree.selection_set(str(saved_id));self.tree.see(str(saved_id));self.parent.refresh_user_controls()
+    def delete_user(self):
+        if not self.selected_id:messagebox.showinfo(APP_NAME,"Selecione um usuário para apagar.",parent=self);return
+        user=self.parent.db.user(self.selected_id)
+        if not user:self.new_user();self.refresh();return
+        if not messagebox.askyesno(APP_NAME,f"Apagar o usuário “{user['name']}”?\n\nO nome continuará aparecendo nas movimentações antigas.",icon="warning",parent=self):return
+        try:self.parent.db.delete_user(self.selected_id)
+        except ValueError as error:messagebox.showwarning(APP_NAME,str(error),parent=self);return
+        self.new_user();self.refresh();self.parent.refresh_user_controls()
+
+
+class ProductManagerDialog(ctk.CTkToplevel):
+    def __init__(self,parent:"EstoqueApp"):
+        super().__init__(parent,fg_color=COLORS["background"]);self.parent=parent;self.title("Gerenciar produtos")
+        scale=parent.ui_scale;width,height=round(920*scale),round(560*scale);self.geometry(f"{width}x{height}+{parent.winfo_x()+60}+{parent.winfo_y()+65}");self.minsize(round(780*scale),round(480*scale));self.transient(parent);self.grab_set();self.grid_columnconfigure(0,weight=1);self.grid_rowconfigure(1,weight=1)
+        header=ctk.CTkFrame(self,fg_color=COLORS["surface"],corner_radius=0);header.grid(row=0,column=0,sticky="ew")
+        ctk.CTkLabel(header,text="PRODUTOS",text_color=COLORS["accent"],font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=28,pady=(20,2));ctk.CTkLabel(header,text="Cadastro de produtos",text_color=COLORS["text"],font=ctk.CTkFont("Inter",23,"bold")).pack(anchor="w",padx=28,pady=(0,20))
+        content=ctk.CTkFrame(self,fg_color="transparent");content.grid(row=1,column=0,sticky="nsew",padx=24,pady=22);content.grid_columnconfigure(0,weight=1);content.grid_rowconfigure(1,weight=1)
+        toolbar=ctk.CTkFrame(content,fg_color="transparent");toolbar.grid(row=0,column=0,sticky="ew",pady=(0,12));self.search=ctk.CTkEntry(toolbar,placeholder_text="Buscar produto, grupo ou variação...",width=330,height=40,corner_radius=9);self.search.pack(side="left");self.search.bind("<KeyRelease>",lambda _event:self.refresh())
+        ctk.CTkButton(toolbar,text="Novo produto",image=parent.icons["plus"],height=40,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.new_product).pack(side="right")
+        ctk.CTkButton(toolbar,text="Excluir",image=parent.icons["trash"],height=40,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["danger"],command=self.delete_product).pack(side="right",padx=8)
+        ctk.CTkButton(toolbar,text="Editar",image=parent.icons["edit"],height=40,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.edit_product).pack(side="right")
+        card=Card(content);card.grid(row=1,column=0,sticky="nsew");self.tree=parent.table(card,("name","group","variant","category","stock"),("Produto","Grupo / modelo","Variação","Categoria","Saldo"),(220,190,170,150,90));self.tree.pack(fill="both",expand=True,padx=18,pady=18);self.tree.bind("<Double-1>",lambda _event:self.edit_product());self.refresh()
+    def refresh(self):
+        self.tree.delete(*self.tree.get_children())
+        for product in self.parent.db.products(self.search.get()):self.tree.insert("","end",iid=str(product["id"]),values=(product["name"],product["group_name"]or"—",product["variant"]or"—",product["category"]or"—",fmt_number(product["stock"])))
+    def selected_product(self):
+        selected=self.tree.selection();return int(selected[0]) if selected else None
+    def _open_editor(self,product=None):
+        self.grab_release();dialog=ProductDialog(self.parent,product);self.wait_window(dialog);self.grab_set()
+        if dialog.result:self.parent.db.save_product(dialog.result,int(product["id"]) if product else None);self.refresh();self.parent.refresh_all()
+    def new_product(self):self._open_editor()
+    def edit_product(self):
+        product_id=self.selected_product()
+        if not product_id:messagebox.showinfo(APP_NAME,"Selecione um produto para editar.",parent=self);return
+        self._open_editor(self.parent.db.product(product_id))
+    def delete_product(self):
+        product_id=self.selected_product()
+        if not product_id:messagebox.showinfo(APP_NAME,"Selecione um produto para excluir.",parent=self);return
+        product=self.parent.db.product(product_id)
+        if not messagebox.askyesno(APP_NAME,f"Excluir o produto “{product['name']}”?",icon="warning",parent=self):return
+        if not self.parent.db.delete_product(product_id):messagebox.showwarning(APP_NAME,"Não é possível excluir um produto com movimentações.",parent=self);return
+        self.refresh();self.parent.refresh_all()
+
+
+class OperationManagerDialog(ctk.CTkToplevel):
+    EFFECT_LABELS = {
+        "positive": "Soma ao estoque (+)",
+        "negative": "Retira do estoque (−)",
+    }
+
+    def __init__(self, parent: "EstoqueApp"):
+        super().__init__(parent, fg_color=COLORS["background"])
+        self.parent = parent
+        self.selected_id: int | None = None
+        self.title("Gerenciar operações")
+        scale = parent.ui_scale
+        width, height = round(760 * scale), round(500 * scale)
+        self.geometry(f"{width}x{height}+{parent.winfo_x()+90}+{parent.winfo_y()+80}")
+        self.minsize(round(680 * scale), round(440 * scale))
+        self.transient(parent); self.grab_set()
+        self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(1, weight=1)
+
+        header = ctk.CTkFrame(self, fg_color=COLORS["surface"], corner_radius=0)
+        header.grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(header, text="OPERAÇÕES", text_color=COLORS["accent"], font=ctk.CTkFont("Inter", 10, "bold")).pack(anchor="w", padx=28, pady=(20, 2))
+        ctk.CTkLabel(header, text="Gerenciar operações", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 23, "bold")).pack(anchor="w", padx=28)
+        ctk.CTkLabel(header, text="Crie nomes para entradas ou saídas específicas. As operações padrão continuam disponíveis.", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 11)).pack(anchor="w", padx=28, pady=(5, 20))
+
+        content = ctk.CTkFrame(self, fg_color="transparent")
+        content.grid(row=1, column=0, sticky="nsew", padx=24, pady=22)
+        content.grid_columnconfigure(0, weight=3); content.grid_columnconfigure(1, weight=2); content.grid_rowconfigure(0, weight=1)
+
+        listing = Card(content)
+        listing.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        ctk.CTkLabel(listing, text="Operações personalizadas", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 14, "bold")).pack(anchor="w", padx=18, pady=(18, 10))
+        self.tree = ttk.Treeview(listing, columns=("name", "effect"), show="headings", selectmode="browse")
+        self.tree.heading("name", text="Nome", anchor="center"); self.tree.heading("effect", text="Efeito", anchor="center")
+        self.tree.column("name", width=180, minwidth=120, anchor="center"); self.tree.column("effect", width=155, minwidth=120, anchor="center")
+        self.tree.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+        self.tree.bind("<<TreeviewSelect>>", self.select_operation)
+
+        editor = Card(content)
+        editor.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        ctk.CTkLabel(editor, text="Cadastro", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 14, "bold")).pack(anchor="w", padx=18, pady=(18, 14))
+        ctk.CTkLabel(editor, text="Nome da operação", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10, "bold")).pack(anchor="w", padx=18, pady=(0, 6))
+        self.name = tk.StringVar()
+        self.name_entry = ctk.CTkEntry(editor, textvariable=self.name, height=40, corner_radius=9, border_color=COLORS["border"], fg_color=COLORS["surface"])
+        self.name_entry.pack(fill="x", padx=18, pady=(0, 16))
+        ctk.CTkLabel(editor, text="O que ela faz?", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10, "bold")).pack(anchor="w", padx=18, pady=(0, 6))
+        self.effect = tk.StringVar(value=self.EFFECT_LABELS["positive"])
+        ctk.CTkOptionMenu(editor, variable=self.effect, values=list(self.EFFECT_LABELS.values()), height=40, corner_radius=9, fg_color=COLORS["surface"], button_color=COLORS["surface_alt"], button_hover_color=COLORS["surface_hover"], text_color=COLORS["text"], dropdown_fg_color=COLORS["surface"], dropdown_hover_color=COLORS["accent_soft"]).pack(fill="x", padx=18, pady=(0, 12))
+        ctk.CTkLabel(editor, text="Exemplo: “Devolução” pode somar e “Avaria” pode retirar.", wraplength=round(230 * scale), justify="left", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10)).pack(anchor="w", padx=18, pady=(0, 18))
+        actions = ctk.CTkFrame(editor, fg_color="transparent")
+        actions.pack(fill="x", padx=18, pady=(0, 10))
+        ctk.CTkButton(actions, text="Nova", width=82, height=38, fg_color=COLORS["surface_alt"], hover_color=COLORS["surface_hover"], text_color=COLORS["text"], command=self.new_operation).pack(side="left")
+        ctk.CTkButton(actions, text="Salvar", height=38, fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], command=self.save_operation).pack(side="right", fill="x", expand=True, padx=(8, 0))
+        self.delete_button = ctk.CTkButton(editor, text="Apagar operação selecionada", height=36, fg_color="transparent", hover_color=COLORS["surface_hover"], text_color=COLORS["danger"], command=self.delete_operation)
+        self.delete_button.pack(fill="x", padx=18, pady=(0, 18))
+        self.refresh(); self.name_entry.focus_set()
+
+    def refresh(self):
+        self.tree.delete(*self.tree.get_children())
+        for operation in self.parent.db.operations(custom_only=True):
+            self.tree.insert("", "end", iid=str(operation["id"]), values=(operation["name"], self.EFFECT_LABELS[operation["effect"]]))
+
+    def new_operation(self):
+        self.selected_id = None; self.tree.selection_remove(self.tree.selection())
+        self.name.set(""); self.effect.set(self.EFFECT_LABELS["positive"]); self.name_entry.focus_set()
+
+    def select_operation(self, _event=None):
+        selected = self.tree.selection()
+        if not selected:
+            return
+        operation = self.parent.db.operation(int(selected[0]))
+        if not operation:
+            return
+        self.selected_id = int(operation["id"]); self.name.set(operation["name"]); self.effect.set(self.EFFECT_LABELS[operation["effect"]])
+
+    def save_operation(self):
+        effect = next((key for key, label in self.EFFECT_LABELS.items() if label == self.effect.get()), "")
+        try:
+            saved_id = self.parent.db.save_operation(self.name.get(), effect, self.selected_id)
+        except ValueError as error:
+            messagebox.showwarning(APP_NAME, str(error), parent=self); return
+        self.refresh(); self.selected_id = saved_id; self.tree.selection_set(str(saved_id)); self.tree.see(str(saved_id)); self.parent.refresh_operation_controls()
+
+    def delete_operation(self):
+        if not self.selected_id:
+            messagebox.showinfo(APP_NAME, "Selecione uma operação personalizada para apagar.", parent=self); return
+        operation = self.parent.db.operation(self.selected_id)
+        if not operation:
+            self.new_operation(); self.refresh(); return
+        if not messagebox.askyesno(APP_NAME, f"Apagar a operação “{operation['name']}”?\n\nEla sairá das opções de novas movimentações, mas continuará identificada no histórico.", icon="warning", parent=self):
+            return
+        try:
+            self.parent.db.delete_operation(self.selected_id)
+        except ValueError as error:
+            messagebox.showwarning(APP_NAME, str(error), parent=self); return
+        self.new_operation(); self.refresh(); self.parent.refresh_operation_controls()
+
+
 class MovementDialog(ctk.CTkToplevel):
     def __init__(self, parent: "EstoqueApp", movement: sqlite3.Row):
         super().__init__(parent, fg_color=COLORS["background"])
         self.parent, self.movement, self.result = parent, movement, None
         self.product_mapping = parent.product_map()
+        self.operation_mapping = parent.operation_map(include_inactive=True)
         self.title("Editar movimentação")
         scale = parent.ui_scale
-        width, height = round(520 * scale), round(610 * scale)
+        width, height = round(520 * scale), round(670 * scale)
         self.geometry(f"{width}x{height}+{parent.winfo_x()+100}+{parent.winfo_y()+70}")
         self.resizable(False, False); self.transient(parent); self.grab_set()
         self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(1, weight=1)
@@ -440,9 +792,10 @@ class MovementDialog(ctk.CTkToplevel):
         def label(text):
             ctk.CTkLabel(form, text=text, text_color=COLORS["text"], font=ctk.CTkFont("Inter", 11, "bold")).pack(anchor="w", pady=(0, 6))
 
-        self.kind = tk.StringVar(value=movement["type"])
+        selected_operation = next((name for name, operation_id in self.operation_mapping.items() if operation_id == int(movement["operation_id"] or 0)), movement["operation_name"])
+        self.operation = tk.StringVar(value=selected_operation)
         label("Operação")
-        ctk.CTkOptionMenu(form, variable=self.kind, values=["entrada", "saida", "ajuste", "inventario"], height=40, corner_radius=9, fg_color=COLORS["surface"], button_color=COLORS["surface_alt"], button_hover_color=COLORS["surface_hover"], text_color=COLORS["text"], dropdown_fg_color=COLORS["surface"], dropdown_hover_color=COLORS["accent_soft"]).pack(fill="x", pady=(0, 16))
+        ctk.CTkOptionMenu(form, variable=self.operation, values=list(self.operation_mapping) or [""], height=40, corner_radius=9, fg_color=COLORS["surface"], button_color=COLORS["surface_alt"], button_hover_color=COLORS["surface_hover"], text_color=COLORS["text"], dropdown_fg_color=COLORS["surface"], dropdown_hover_color=COLORS["accent_soft"]).pack(fill="x", pady=(0, 16))
 
         selected_product = next((text for text, product_id in self.product_mapping.items() if product_id == int(movement["product_id"])), "")
         self.product = tk.StringVar(value=selected_product)
@@ -457,6 +810,12 @@ class MovementDialog(ctk.CTkToplevel):
         label("Data (DD/MM/AA)")
         self.date_entry = MaskedDateEntry(form, COLORS, initial=datetime.strptime(movement["movement_date"], "%Y-%m-%d").date())
         self.date_entry.pack(fill="x", pady=(0, 16))
+
+        self.checked_by = tk.StringVar(value=movement["checked_by"] or "")
+        label("Usuário responsável")
+        user_values=parent.user_names()
+        if self.checked_by.get() and self.checked_by.get() not in user_values:user_values.append(self.checked_by.get())
+        ctk.CTkOptionMenu(form,variable=self.checked_by,values=user_values or [""],height=40,corner_radius=9,fg_color=COLORS["surface"],button_color=COLORS["surface_alt"],button_hover_color=COLORS["surface_hover"],text_color=COLORS["text"],dropdown_fg_color=COLORS["surface"],dropdown_hover_color=COLORS["accent_soft"]).pack(fill="x",pady=(0,16))
 
         reason = movement["reason"] if movement["reason"] not in ("Sem observação", "Contagem de inventário") else ""
         self.reason = tk.StringVar(value=reason)
@@ -476,7 +835,12 @@ class MovementDialog(ctk.CTkToplevel):
             movement_date = self.date_entry.get_date().isoformat()
         except ValueError as error:
             messagebox.showwarning(APP_NAME, str(error) or "Revise a quantidade e a data.", parent=self); return
-        self.result = {"product_id": product_id, "kind": self.kind.get(), "informed": informed, "movement_date": movement_date, "reason": self.reason.get().strip()}
+        operation_id = self.operation_mapping.get(self.operation.get())
+        if not operation_id:
+            messagebox.showwarning(APP_NAME, "Selecione uma operação.", parent=self); return
+        if not self.checked_by.get().strip():
+            messagebox.showwarning(APP_NAME, "Informe o usuário responsável.", parent=self); return
+        self.result = {"product_id": product_id, "operation": operation_id, "informed": informed, "movement_date": movement_date, "reason": self.reason.get().strip(), "checked_by": self.checked_by.get().strip()}
         self.destroy()
 
 
@@ -496,7 +860,7 @@ class EstoqueApp(ctk.CTk):
         self._last_window_state = self.settings.get("window_state", "zoomed") if self.settings.get("window_state") in ("normal", "zoomed") else "zoomed"
         self.iconphoto(True, ImageTk.PhotoImage(app_icon(256))); self.protocol("WM_DELETE_WINDOW", self.close)
         self.brand_icon = brand_mark(86)
-        self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "count", "settings", "plus", "search", "edit", "trash", "download", "upload", "refresh")}
+        self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "count", "settings", "registration", "user", "operation", "plus", "search", "edit", "trash", "download", "upload", "refresh")}
         self.nav_buttons = {}; self.pages = {}; self.build_shell(); self.show_page("stock")
         self.bind("<Configure>", self.remember_window_geometry)
         self.after_idle(self.restore_window)
@@ -535,7 +899,7 @@ class EstoqueApp(ctk.CTk):
         brand = ctk.CTkFrame(logo, fg_color="transparent"); brand.pack(side="left", padx=13)
         ctk.CTkLabel(brand, text="ESTOQUE", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 16, "bold")).pack(anchor="w")
         ctk.CTkLabel(brand, text="BOLSAS BABY", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10, "bold")).pack(anchor="w", pady=(2,0))
-        for key, label in (("stock","Estoque atual"),("movements","Movimentações"),("count","Contagem"),("products","Produtos"),("settings","Configurações")):
+        for key, label in (("stock","Estoque atual"),("movements","Movimentações"),("count","Contagem"),("registration","Cadastro"),("settings","Configurações")):
             button = ctk.CTkButton(self.sidebar, text=label, image=self.icons[key], compound="left", anchor="w", height=48, corner_radius=10, fg_color="transparent", hover_color=COLORS["surface_hover"], text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 13, "bold"), command=lambda k=key:self.show_page(k))
             button.pack(fill="x", padx=16, pady=4); self.nav_buttons[key]=button
         ctk.CTkLabel(self.sidebar, text=f"●  Dados locais protegidos\n    Versão {APP_VERSION}", justify="left", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10)).pack(side="bottom", anchor="w", padx=26, pady=28)
@@ -543,7 +907,7 @@ class EstoqueApp(ctk.CTk):
 
     def show_page(self,key):
         for page in self.pages.values(): page.grid_remove()
-        if key not in self.pages: self.pages[key]={"products":self.products_page,"stock":self.stock_page,"movements":self.movements_page,"count":self.count_page,"settings":self.settings_page}[key]()
+        if key not in self.pages: self.pages[key]={"registration":self.registration_page,"stock":self.stock_page,"movements":self.movements_page,"count":self.count_page,"settings":self.settings_page}[key]()
         self.pages[key].grid(row=0,column=0,sticky="nsew",padx=32,pady=28)
         for name,button in self.nav_buttons.items():
             selected = name == key
@@ -553,7 +917,7 @@ class EstoqueApp(ctk.CTk):
                 border_width=1 if selected else 0,
                 border_color=COLORS["accent"] if selected else COLORS["sidebar"],
             )
-        {"products":self.refresh_products,"stock":self.refresh_stock,"movements":self.refresh_movements,"count":self.refresh_counts,"settings":lambda:None}[key]()
+        {"registration":lambda:None,"stock":self.refresh_stock,"movements":self.refresh_movements,"count":self.refresh_counts,"settings":lambda:None}[key]()
 
     def table(self,parent,columns,headings,widths):
         tree=ttk.Treeview(parent,columns=columns,show="headings",selectmode="browse")
@@ -564,6 +928,30 @@ class EstoqueApp(ctk.CTk):
         dark=ctk.get_appearance_mode()=="Dark"; bg="#121824" if dark else "#FFFFFF"; fg="#F3F7FB" if dark else "#202936"; head="#192232" if dark else "#EEF3F8"; selected="#203C52" if dark else "#DDEFFC"
         style=ttk.Style(self); style.theme_use("clam"); style.configure("Treeview",background=bg,fieldbackground=bg,foreground=fg,rowheight=max(38,round(34*self.ui_scale)),borderwidth=0,font=("Inter",10)); style.configure("Treeview.Heading",background=head,foreground=fg,relief="flat",font=("Inter",9,"bold"),padding=10); style.map("Treeview",background=[("selected",selected)],foreground=[("selected",fg)])
         if hasattr(self,"stock_tree"):self.stock_tree.tag_configure("group_header",background="#17293B" if dark else "#E4F0F7",foreground="#8BD5FF" if dark else "#245F89",font=("Inter",10,"bold"))
+
+    def registration_page(self):
+        page=ctk.CTkFrame(self.content,fg_color="transparent")
+        PageTitle(page,"Cadastro","Escolha o tipo de cadastro que deseja abrir.").pack(fill="x",pady=(0,26))
+        ctk.CTkLabel(page,text="Cada opção possui seu próprio gerenciador, mantendo usuários, operações e produtos separados.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(0,18))
+        choices=ctk.CTkFrame(page,fg_color="transparent");choices.pack(fill="both",expand=True);choices.grid_columnconfigure((0,1,2),weight=1);choices.grid_rowconfigure(0,weight=1)
+        definitions=(
+            ("Usuários","Cadastre quem poderá ser identificado nas movimentações.","user",self.open_user_manager),
+            ("Operações","Defina nomes personalizados que somam ou retiram estoque.","operation",self.open_operation_manager),
+            ("Produtos","Cadastre, edite e organize os produtos e seus grupos.","products",self.open_product_manager),
+        )
+        for column,(title,description,icon_name,command) in enumerate(definitions):
+            card=Card(choices);card.grid(row=0,column=column,sticky="nsew",padx=(0 if column==0 else 8,0 if column==2 else 8))
+            large_icon=icon(icon_name,72)
+            label=ctk.CTkLabel(card,text="",image=large_icon,width=96,height=96);label.image=large_icon;label.pack(pady=(48,20))
+            ctk.CTkLabel(card,text=title,text_color=COLORS["text"],font=ctk.CTkFont("Inter",20,"bold")).pack()
+            ctk.CTkLabel(card,text=description,wraplength=250,justify="center",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(padx=26,pady=(10,24))
+            ctk.CTkButton(card,text=f"Abrir cadastro de {title.lower()}",height=44,corner_radius=10,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=command).pack(fill="x",padx=28,pady=(0,46))
+        return page
+
+    def open_user_manager(self):
+        dialog=UserManagerDialog(self);self.wait_window(dialog);self.refresh_user_controls()
+    def open_product_manager(self):
+        dialog=ProductManagerDialog(self);self.wait_window(dialog);self.refresh_all()
 
     def products_page(self):
         page=ctk.CTkFrame(self.content,fg_color="transparent"); PageTitle(page,"Produtos","Cadastre e organize os itens do seu estoque.").pack(fill="x",pady=(0,22))
@@ -693,39 +1081,145 @@ class EstoqueApp(ctk.CTk):
         for label,text in zip(self.count_cards,(str(pending),str(counted_today),str(differences_today),f"{average}%")):label.configure(text=text)
 
     def movements_page(self):
-        page=ctk.CTkFrame(self.content,fg_color="transparent");PageTitle(page,"Movimentações","Registre entradas, saídas, ajustes e contagens de inventário.").pack(fill="x",pady=(0,22));body=ctk.CTkFrame(page,fg_color="transparent");body.pack(fill="both",expand=True);body.grid_columnconfigure(1,weight=1);body.grid_rowconfigure(0,weight=1)
-        form=Card(body,width=350);form.grid(row=0,column=0,sticky="ns",padx=(0,16));form.grid_propagate(False);ctk.CTkLabel(form,text="Nova movimentação",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(anchor="w",padx=20,pady=(22,18));self.m_type=tk.StringVar(value="entrada");self.m_product=tk.StringVar();self.m_quantity=tk.StringVar();self.m_reason=tk.StringVar()
-        def field_label(text): ctk.CTkLabel(form,text=text,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=20,pady=(0,6))
-        field_label("Operação")
-        self.m_type_menu=ctk.CTkOptionMenu(form,variable=self.m_type,values=["entrada","saida","ajuste","inventario"],height=40,corner_radius=9,fg_color=COLORS["surface"],button_color=COLORS["surface_alt"],button_hover_color=COLORS["surface_hover"],text_color=COLORS["text"],dropdown_fg_color=COLORS["surface"],dropdown_hover_color=COLORS["accent_soft"])
-        self.m_type_menu.pack(fill="x",padx=20,pady=(0,14))
-        field_label("Produto")
-        self.m_product_combo=ctk.CTkOptionMenu(form,variable=self.m_product,values=[""],height=40,corner_radius=9,fg_color=COLORS["surface"],button_color=COLORS["surface_alt"],button_hover_color=COLORS["surface_hover"],text_color=COLORS["text"],dropdown_fg_color=COLORS["surface"],dropdown_hover_color=COLORS["accent_soft"],command=lambda _v:self.update_current_stock())
-        self.m_product_combo.pack(fill="x",padx=20,pady=(0,14))
-        field_label("Quantidade / nova contagem")
-        ctk.CTkEntry(form,textvariable=self.m_quantity,height=40,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface"]).pack(fill="x",padx=20,pady=(0,14))
-        field_label("Data (DD/MM/AA)")
-        self.m_date_entry=MaskedDateEntry(form,COLORS,initial=date.today())
-        self.m_date_entry.pack(fill="x",padx=20,pady=(0,14))
-        field_label("Motivo ou observação")
-        ctk.CTkEntry(form,textvariable=self.m_reason,height=40,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface"]).pack(fill="x",padx=20,pady=(0,14))
-        self.current_stock=ctk.CTkLabel(form,text="Saldo atual: —",height=40,corner_radius=9,fg_color=COLORS["accent_soft"],text_color=COLORS["accent"],font=ctk.CTkFont("Inter",11,"bold"));self.current_stock.pack(fill="x",padx=20,pady=(0,16));ctk.CTkButton(form,text="Registrar movimentação",height=44,corner_radius=10,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.register_movement).pack(fill="x",padx=20,pady=(0,22))
-        history=Card(body);history.grid(row=0,column=1,sticky="nsew");bar=ctk.CTkFrame(history,fg_color="transparent");bar.pack(fill="x",padx=20,pady=18);ctk.CTkLabel(bar,text="Histórico",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(side="left")
-        self.history_filter=tk.StringVar(value="todos")
-        ctk.CTkOptionMenu(bar,variable=self.history_filter,values=["todos","entrada","saida","ajuste","inventario"],width=150,height=38,fg_color=COLORS["surface_alt"],button_color=COLORS["surface_hover"],text_color=COLORS["text"],command=lambda _v:self.refresh_movements()).pack(side="right")
-        ctk.CTkButton(bar,text="Excluir",image=self.icons["trash"],width=92,height=38,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["danger"],command=self.delete_movement).pack(side="right",padx=(8,8))
-        ctk.CTkButton(bar,text="Editar",image=self.icons["edit"],width=92,height=38,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.edit_movement).pack(side="right")
-        self.history_tree=self.table(history,("date","product","type","quantity","stock","reason"),("Data","Produto","Operação","Alteração","Saldo","Observação"),(90,170,95,90,80,230));self.history_tree.pack(fill="both",expand=True,padx=20,pady=(0,20));self.history_tree.bind("<Double-1>",lambda _event:self.edit_movement());self.configure_tables();return page
+        page = ctk.CTkFrame(self.content, fg_color="transparent")
+        PageTitle(page, "Movimentações", "Monte um conjunto de produtos, revise e registre tudo de uma vez.").pack(fill="x", pady=(0, 18))
+        self.movement_draft: list[dict] = []
+        self.draft_edit_index: int | None = None
+        self.m_operation = tk.StringVar(value="Entrada")
+        self.m_product = tk.StringVar()
+        self.m_quantity = tk.StringVar()
+        self.m_reason = tk.StringVar()
+        self.m_user = tk.StringVar()
+
+        composer = Card(page)
+        composer.pack(fill="x", pady=(0, 16))
+        composer.grid_columnconfigure(0, weight=2); composer.grid_columnconfigure(1, weight=3)
+
+        details = ctk.CTkFrame(composer, fg_color="transparent")
+        details.grid(row=0, column=0, sticky="nsew", padx=(20, 14), pady=18)
+        ctk.CTkLabel(details, text="Dados da movimentação", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 15, "bold")).pack(anchor="w", pady=(0, 14))
+
+        def detail_label(text):
+            ctk.CTkLabel(details, text=text, text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10, "bold")).pack(anchor="w", pady=(0, 6))
+
+        detail_label("Operação para todo o conjunto")
+        self.m_operation_menu = ctk.CTkOptionMenu(details, variable=self.m_operation, values=[""], height=38, corner_radius=9, fg_color=COLORS["surface"], button_color=COLORS["surface_alt"], button_hover_color=COLORS["surface_hover"], text_color=COLORS["text"], dropdown_fg_color=COLORS["surface"], dropdown_hover_color=COLORS["accent_soft"], command=lambda _value: self.on_operation_change())
+        self.m_operation_menu.pack(fill="x",pady=(0,12))
+        detail_label("Data e usuário responsável")
+        date_user = ctk.CTkFrame(details, fg_color="transparent")
+        date_user.pack(fill="x", pady=(0, 12)); date_user.grid_columnconfigure((0, 1), weight=1)
+        self.m_date_entry = MaskedDateEntry(date_user, COLORS, initial=date.today())
+        self.m_date_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.m_user_menu=ctk.CTkOptionMenu(date_user,variable=self.m_user,values=["Cadastre um usuário"],height=38,corner_radius=9,fg_color=COLORS["surface"],button_color=COLORS["surface_alt"],button_hover_color=COLORS["surface_hover"],text_color=COLORS["text"],dropdown_fg_color=COLORS["surface"],dropdown_hover_color=COLORS["accent_soft"])
+        self.m_user_menu.grid(row=0,column=1,sticky="ew",padx=(6,0))
+        detail_label("Motivo ou observação do conjunto")
+        ctk.CTkEntry(details, textvariable=self.m_reason, height=38, corner_radius=9, border_color=COLORS["border"], fg_color=COLORS["surface"]).pack(fill="x")
+
+        items = ctk.CTkFrame(composer, fg_color="transparent")
+        items.grid(row=0, column=1, sticky="nsew", padx=(14, 20), pady=18)
+        item_header = ctk.CTkFrame(items, fg_color="transparent")
+        item_header.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(item_header, text="Produtos do conjunto", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 15, "bold")).pack(side="left")
+        self.current_stock = ctk.CTkLabel(item_header, text="Saldo atual: —", text_color=COLORS["accent"], font=ctk.CTkFont("Inter", 10, "bold"))
+        self.current_stock.pack(side="right")
+        add_row = ctk.CTkFrame(items, fg_color="transparent")
+        add_row.pack(fill="x", pady=(0, 10)); add_row.grid_columnconfigure(0, weight=1)
+        self.m_product_combo = ctk.CTkOptionMenu(add_row, variable=self.m_product, values=[""], height=38, corner_radius=9, fg_color=COLORS["surface"], button_color=COLORS["surface_alt"], button_hover_color=COLORS["surface_hover"], text_color=COLORS["text"], dropdown_fg_color=COLORS["surface"], dropdown_hover_color=COLORS["accent_soft"], command=lambda _value: self.update_current_stock())
+        self.m_product_combo.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.m_quantity_entry = ctk.CTkEntry(add_row, textvariable=self.m_quantity, placeholder_text="Quantidade", width=120, height=38, corner_radius=9, border_color=COLORS["border"], fg_color=COLORS["surface"])
+        self.m_quantity_entry.grid(row=0, column=1, padx=(0, 8))
+        self.m_add_button = ctk.CTkButton(add_row, text="Adicionar", width=105, height=38, corner_radius=9, fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], command=self.add_draft_item)
+        self.m_add_button.grid(row=0, column=2)
+        self.draft_tree = self.table(items, ("product", "quantity"), ("Produto", "Quantidade"), (360, 120))
+        self.draft_tree.configure(height=4)
+        self.draft_tree.pack(fill="x")
+        draft_actions = ctk.CTkFrame(items, fg_color="transparent")
+        draft_actions.pack(fill="x", pady=(8, 0))
+        ctk.CTkButton(draft_actions, text="Remover", image=self.icons["trash"], width=95, height=34, fg_color="transparent", hover_color=COLORS["surface_hover"], text_color=COLORS["danger"], command=self.remove_draft_item).pack(side="left")
+        ctk.CTkButton(draft_actions, text="Editar item", image=self.icons["edit"], width=105, height=34, fg_color="transparent", hover_color=COLORS["surface_hover"], text_color=COLORS["text"], command=self.edit_draft_item).pack(side="left", padx=(6, 0))
+        self.m_save_button = ctk.CTkButton(draft_actions, text="Salvar movimentação (0 itens)", height=40, corner_radius=9, fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], state="disabled", command=self.register_movement)
+        self.m_save_button.pack(side="right")
+
+        history = Card(page)
+        history.pack(fill="both", expand=True)
+        bar = ctk.CTkFrame(history, fg_color="transparent")
+        bar.pack(fill="x", padx=20, pady=16)
+        ctk.CTkLabel(bar, text="Histórico", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 16, "bold")).pack(side="left")
+        self.history_filter = tk.StringVar(value="Todas as operações")
+        self.history_filter_menu = ctk.CTkOptionMenu(bar, variable=self.history_filter, values=["Todas as operações"], width=175, height=36, fg_color=COLORS["surface_alt"], button_color=COLORS["surface_hover"], text_color=COLORS["text"], command=lambda _value: self.refresh_movements())
+        self.history_filter_menu.pack(side="right")
+        ctk.CTkButton(bar, text="Excluir", image=self.icons["trash"], width=92, height=36, corner_radius=9, fg_color=COLORS["surface_alt"], hover_color=COLORS["surface_hover"], text_color=COLORS["danger"], command=self.delete_movement).pack(side="right", padx=(8, 8))
+        ctk.CTkButton(bar, text="Editar", image=self.icons["edit"], width=92, height=36, corner_radius=9, fg_color=COLORS["surface_alt"], hover_color=COLORS["surface_hover"], text_color=COLORS["text"], command=self.edit_movement).pack(side="right")
+        self.history_tree = self.table(history, ("batch", "date", "operation", "product", "quantity", "stock", "user", "reason"), ("Lote", "Data", "Operação", "Produto", "Alteração", "Saldo", "Usuário", "Observação"), (60, 78, 115, 170, 82, 72, 105, 170))
+        self.history_tree.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        self.history_tree.bind("<Double-1>", lambda _event: self.edit_movement())
+        self.configure_tables()
+        return page
 
     def product_map(self):return {f"{product_label(p)}  [{p['unit']}]":int(p["id"]) for p in self.db.products()}
+    def operation_map(self, include_inactive=False):return {str(operation["name"]):int(operation["id"]) for operation in self.db.operations(include_inactive=include_inactive)}
+    def user_names(self, include_inactive=False):return [str(user["name"]) for user in self.db.users(include_inactive=include_inactive)]
+    def refresh_user_controls(self):
+        if not hasattr(self,"m_user_menu"):return
+        names=self.user_names();values=names or ["Cadastre um usuário na aba Cadastro"];self.m_user_menu.configure(values=values)
+        if self.m_user.get() not in names:self.m_user.set(names[0] if names else values[0])
+    def refresh_operation_controls(self):
+        active = self.operation_map()
+        if hasattr(self, "m_operation_menu"):
+            values = list(active) or [""]
+            self.m_operation_menu.configure(values=values)
+            if self.m_operation.get() not in active:
+                self.m_operation.set("Entrada" if "Entrada" in active else values[0])
+            self.operation_mapping = active
+            self.on_operation_change()
+        if hasattr(self, "history_filter_menu"):
+            all_operations = self.operation_map(include_inactive=True)
+            self.history_operation_mapping = {"Todas as operações": "todos", **all_operations}
+            self.history_filter_menu.configure(values=list(self.history_operation_mapping))
+            if self.history_filter.get() not in self.history_operation_mapping:
+                self.history_filter.set("Todas as operações")
+    def open_operation_manager(self):
+        dialog=OperationManagerDialog(self);self.wait_window(dialog);self.refresh_operation_controls();self.refresh_movements()
+    def on_operation_change(self):
+        if not hasattr(self, "m_quantity_entry"):return
+        operation=self.db.operation(getattr(self, "operation_mapping", {}).get(self.m_operation.get(), 0))
+        self.m_quantity_entry.configure(placeholder_text="Nova contagem" if operation and operation["effect"]=="set" else "Quantidade")
     def update_current_stock(self):
         pid=self.product_map().get(self.m_product.get());self.current_stock.configure(text=f"Saldo atual: {fmt_number(self.db.stock(pid))}" if pid else "Saldo atual: —")
-    def register_movement(self):
-        pid=self.product_map().get(self.m_product.get())
+    def add_draft_item(self):
+        mapping=self.product_map();pid=mapping.get(self.m_product.get())
         if not pid:messagebox.showwarning(APP_NAME,"Selecione um produto.",parent=self);return
-        try:amount=float(self.m_quantity.get().replace(",","."));movement_date=self.m_date_entry.get_date();self.db.add_movement(pid,self.m_type.get(),amount,movement_date.isoformat(),self.m_reason.get().strip())
+        try:amount=float(self.m_quantity.get().replace(",","."))
+        except ValueError:messagebox.showwarning(APP_NAME,"Informe uma quantidade válida.",parent=self);return
+        operation=self.db.operation(getattr(self,"operation_mapping",{}).get(self.m_operation.get(),0))
+        if amount<0 or (operation and operation["effect"]!="set" and amount<=0):messagebox.showwarning(APP_NAME,"A quantidade deve ser maior que zero.",parent=self);return
+        existing=next((index for index,item in enumerate(self.movement_draft) if item["product_id"]==pid and index!=self.draft_edit_index),None)
+        if existing is not None:messagebox.showwarning(APP_NAME,"Esse produto já está no conjunto. Edite o item existente.",parent=self);return
+        item={"product_id":pid,"quantity":amount}
+        if self.draft_edit_index is None:self.movement_draft.append(item)
+        else:self.movement_draft[self.draft_edit_index]=item
+        self.draft_edit_index=None;self.m_quantity.set("");self.m_add_button.configure(text="Adicionar");self.refresh_draft()
+    def refresh_draft(self):
+        if not hasattr(self,"draft_tree"):return
+        self.draft_tree.delete(*self.draft_tree.get_children());mapping=self.product_map();reverse={value:key for key,value in mapping.items()}
+        for index,item in enumerate(self.movement_draft):
+            label=reverse.get(item["product_id"],"Produto removido");self.draft_tree.insert("","end",iid=str(index),values=(label,fmt_number(item["quantity"])))
+        count=len(self.movement_draft);self.m_save_button.configure(text=f"Salvar movimentação ({count} {'item' if count==1 else 'itens'})",state="normal" if count else "disabled")
+    def edit_draft_item(self):
+        selected=self.draft_tree.selection()
+        if not selected:messagebox.showinfo(APP_NAME,"Selecione um item do conjunto para editar.",parent=self);return
+        index=int(selected[0]);item=self.movement_draft[index];reverse={value:key for key,value in self.product_map().items()};self.draft_edit_index=index;self.m_product.set(reverse.get(item["product_id"],""));self.m_quantity.set(fmt_number(item["quantity"]));self.m_add_button.configure(text="Atualizar");self.update_current_stock()
+    def remove_draft_item(self):
+        selected=self.draft_tree.selection()
+        if not selected:messagebox.showinfo(APP_NAME,"Selecione um item do conjunto para remover.",parent=self);return
+        del self.movement_draft[int(selected[0])];self.draft_edit_index=None;self.m_quantity.set("");self.m_add_button.configure(text="Adicionar");self.refresh_draft()
+    def register_movement(self):
+        operation_id=getattr(self,"operation_mapping",{}).get(self.m_operation.get())
+        if not operation_id:messagebox.showwarning(APP_NAME,"Selecione uma operação.",parent=self);return
+        if self.m_user.get() not in self.user_names():messagebox.showwarning(APP_NAME,"Cadastre e selecione um usuário responsável na aba Cadastro.",parent=self);return
+        try:movement_date=self.m_date_entry.get_date();self.db.add_movement_batch(operation_id,[(item["product_id"],item["quantity"]) for item in self.movement_draft],movement_date.isoformat(),self.m_reason.get().strip(),self.m_user.get())
         except ValueError as error:messagebox.showwarning(APP_NAME,str(error)or"Revise a quantidade e a data.",parent=self);return
-        self.m_quantity.set("");self.m_reason.set("");self.m_date_entry.set_date(date.today());self.refresh_all();self.update_current_stock();messagebox.showinfo(APP_NAME,"Movimentação registrada.",parent=self)
+        count=len(self.movement_draft);self.movement_draft.clear();self.draft_edit_index=None;self.m_quantity.set("");self.m_reason.set("");self.m_date_entry.set_date(date.today());self.refresh_draft();self.refresh_all();self.update_current_stock();messagebox.showinfo(APP_NAME,f"Movimentação registrada com {count} {'produto' if count==1 else 'produtos'}.",parent=self)
     def selected_movement(self):
         selected=self.history_tree.selection();return int(selected[0]) if selected else None
     def edit_movement(self):
@@ -750,8 +1244,12 @@ class EstoqueApp(ctk.CTk):
         self.refresh_all();self.update_current_stock();messagebox.showinfo(APP_NAME,"Movimentação excluída.",parent=self)
     def refresh_movements(self):
         if not hasattr(self,"history_tree"):return
-        mapping=self.product_map();self.m_product_combo.configure(values=list(mapping)or[""]);self.history_tree.delete(*self.history_tree.get_children());labels={"entrada":"Entrada","saida":"Saída","ajuste":"Ajuste","inventario":"Inventário"}
-        for m in self.db.movements(self.history_filter.get()):qty=float(m["quantity"]);self.history_tree.insert("","end",iid=str(m["id"]),values=(datetime.strptime(m["movement_date"],"%Y-%m-%d").strftime("%d/%m/%y"),product_label(m),labels[m["type"]],f"{'+' if qty>0 else ''}{fmt_number(qty)} {m['unit']}",f"{fmt_number(m['resulting_stock'])} {m['unit']}",m["reason"]))
+        mapping=self.product_map();self.m_product_combo.configure(values=list(mapping)or[""]);self.refresh_user_controls()
+        if self.m_product.get() not in mapping:self.m_product.set(next(iter(mapping),""));self.update_current_stock()
+        self.refresh_operation_controls();self.history_tree.delete(*self.history_tree.get_children())
+        operation_filter=getattr(self,"history_operation_mapping",{}).get(self.history_filter.get(),"todos")
+        for m in self.db.movements(operation_filter):
+            qty=float(m["quantity"]);self.history_tree.insert("","end",iid=str(m["id"]),values=(f"#{m['batch_id']}" if m["batch_id"] else "—",datetime.strptime(m["movement_date"],"%Y-%m-%d").strftime("%d/%m/%y"),m["operation_name"],product_label(m),f"{'+' if qty>0 else ''}{fmt_number(qty)} {m['unit']}",f"{fmt_number(m['resulting_stock'])} {m['unit']}",m["checked_by"]or"—",m["reason"]))
 
     def settings_page(self):
         page=ctk.CTkFrame(self.content,fg_color="transparent");PageTitle(page,"Configurações","Personalize a aparência e proteja seus dados.").pack(fill="x",pady=(0,22))
