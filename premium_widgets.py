@@ -12,9 +12,9 @@ from premium_icons import icon
 
 
 CONFIDENCE_TIERS = (
-    (95, "Máxima", ("#2478C4", "#38BDF8")),
-    (80, "Alta", ("#27845E", "#4ADE80")),
-    (55, "Média", ("#B77912", "#FFD166")),
+    (90, "Máxima", ("#2478C4", "#38BDF8")),
+    (61, "Alta", ("#27845E", "#4ADE80")),
+    (41, "Média", ("#B77912", "#FFD166")),
     (0, "Baixa", ("#C94B4B", "#FF6B6B")),
 )
 
@@ -72,7 +72,7 @@ class TreeConfidenceOverlay:
         self.labels: list[tk.Label] = []
         self.images: list[ImageTk.PhotoImage] = []
         self._job = None
-        for event in ("<Configure>", "<Expose>", "<MouseWheel>", "<Button-4>", "<Button-5>", "<KeyRelease>", "<ButtonRelease-1>", "<<TreeviewSelect>>"):
+        for event in ("<Configure>", "<MouseWheel>", "<Button-4>", "<Button-5>", "<KeyRelease>", "<ButtonRelease-1>", "<<TreeviewSelect>>"):
             self.tree.bind(event, self.schedule, add="+")
 
     def set_scores(self, scores: dict[int | str, int]):
@@ -95,6 +95,12 @@ class TreeConfidenceOverlay:
         self._select(item_id)
         if self.activate:
             self.activate()
+
+    def _scroll(self, event):
+        direction = -1 if event.delta > 0 else 1
+        self.tree.yview_scroll(direction, "units")
+        self.schedule()
+        return "break"
 
     def redraw(self):
         self._job = None
@@ -127,6 +133,7 @@ class TreeConfidenceOverlay:
             )
             label.bind("<Button-1>", lambda _event, current=item_id: self._select(current))
             label.bind("<Double-Button-1>", lambda _event, current=item_id: self._open(current))
+            label.bind("<MouseWheel>", self._scroll)
             label.place(x=x + (cell_width - image_width) // 2, y=y + (cell_height - image_height) // 2)
             self.labels.append(label)
             self.images.append(photo)

@@ -10,7 +10,7 @@ Aplicativo desktop nativo para Windows, desenvolvido em Python com Tkinter e SQL
 - Aba **Estoque atual** com saldo, situação e confiança; a última contagem fica somente na aba **Contagem**
 - Aba **Contagem** no formato de check-in da planilha, com quantidade física, data e responsável
 - Índice de confiança calculado pelos dias, frequência e volume movimentado desde a última contagem
-- Velocímetro de confiança por produto: baixa em vermelho, média em amarelo, alta em verde e máxima em azul
+- Medidores de confiança: vermelho de 0% a 40%, amarelo de 41% a 60%, verde de 61% a 89% e azul de 90% a 100%
 - Mini velocímetros substituem os percentuais nas colunas de confiança das tabelas
 - Entradas, saídas, ajustes e inventário com data editável
 - Edição e exclusão de movimentações com recálculo seguro dos saldos

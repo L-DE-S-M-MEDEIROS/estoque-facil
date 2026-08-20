@@ -18,10 +18,10 @@ import customtkinter as ctk
 from PIL import ImageTk
 
 from premium_icons import app_icon, brand_mark, icon
-from premium_widgets import ConfidenceGauge, MaskedDateEntry, TreeConfidenceOverlay, confidence_tier
+from premium_widgets import MaskedDateEntry, TreeConfidenceOverlay, confidence_tier
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "0.8.1"
+APP_VERSION = "0.8.2"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -636,29 +636,13 @@ class EstoqueApp(ctk.CTk):
         ctk.CTkButton(bar,text="Contar",image=self.icons["count"],width=95,height=36,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.prepare_count).pack(side="right",padx=(0,8))
         ctk.CTkButton(bar,text="Explicar",width=90,height=36,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.explain_confidence).pack(side="right",padx=(0,8))
         self.count_search=ctk.CTkEntry(bar,placeholder_text="Filtrar produto...",width=165,height=36,corner_radius=9);self.count_search.pack(side="right",padx=(0,8));self.count_search.bind("<KeyRelease>",lambda _e:self.refresh_counts())
-        confidence_panel=ctk.CTkFrame(listing,height=174,corner_radius=10,fg_color=COLORS["surface_alt"],border_width=1,border_color=COLORS["border"]);confidence_panel.pack(fill="x",padx=20,pady=(0,14));confidence_panel.pack_propagate(False)
-        self.confidence_gauge=ConfidenceGauge(confidence_panel,COLORS,width=248);self.confidence_gauge.pack(side="left",padx=(16,20),pady=10)
-        confidence_text=ctk.CTkFrame(confidence_panel,fg_color="transparent");confidence_text.pack(side="left",fill="both",expand=True,pady=22,padx=(0,18))
-        self.confidence_title=ctk.CTkLabel(confidence_text,text="Confiança média do estoque",text_color=COLORS["text"],font=ctk.CTkFont("Inter",14,"bold"),anchor="w");self.confidence_title.pack(fill="x")
-        self.confidence_description=ctk.CTkLabel(confidence_text,text="Visão geral calculada a partir de todos os produtos cadastrados.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10),justify="left",anchor="nw",wraplength=460);self.confidence_description.pack(fill="x",pady=(7,9))
-        legend=ctk.CTkFrame(confidence_text,fg_color="transparent");legend.pack(fill="x")
-        for text,color in (("● Baixa",("#C94B4B","#FF6B6B")),("● Média",("#B77912","#FFD166")),("● Alta",("#27845E","#4ADE80")),("● Máxima",("#2478C4","#38BDF8"))):ctk.CTkLabel(legend,text=text,text_color=color,font=ctk.CTkFont("Inter",9,"bold")).pack(side="left",padx=(0,14))
-        self.count_tree=self.table(listing,("product","stock","checkin","date","responsible","confidence","difference"),("Produto","Estoque atual","Check-in","Data","Responsável","Confiança","Diferença"),(170,75,75,70,80,85,85));self.count_tree.pack(fill="both",expand=True,padx=20,pady=(0,20));self.count_tree.bind("<<TreeviewSelect>>",lambda _e:self.update_confidence_gauge());self.count_tree.bind("<Double-1>",lambda _e:self.prepare_count());self.count_confidence_cells=TreeConfidenceOverlay(self.count_tree,COLORS,activate=self.prepare_count);self.configure_tables();return page
+        self.count_tree=self.table(listing,("product","stock","checkin","date","responsible","confidence","difference"),("Produto","Estoque atual","Check-in","Data","Responsável","Confiança","Diferença"),(170,75,75,70,80,85,85));self.count_tree.pack(fill="both",expand=True,padx=20,pady=(0,20));self.count_tree.bind("<Double-1>",lambda _e:self.prepare_count());self.count_confidence_cells=TreeConfidenceOverlay(self.count_tree,COLORS,activate=self.prepare_count);self.configure_tables();return page
 
     def update_count_current(self):
         pid=self.product_map().get(self.c_product.get()) if hasattr(self,"c_product") else None
         if not hasattr(self,"count_current"):return
         product=self.db.product(pid) if pid else None
         self.count_current.configure(text=f"Saldo do sistema: {fmt_number(product['stock'])} {product['unit']}" if product else "Saldo do sistema: —")
-        if product:self.show_product_confidence(product)
-
-    def show_product_confidence(self,product):
-        if not hasattr(self,"confidence_gauge"):return
-        trust=self.db.stock_confidence(int(product["id"]),float(product["stock"]));self.confidence_gauge.set_score(trust["score"]);self.confidence_title.configure(text=product_label(product));self.confidence_description.configure(text=f"{trust['level']} • {trust['days']} dia(s) desde a referência • {trust['movement_count']} movimentação(ões) • {fmt_number(trust['moved_units'])} {product['unit']} movimentadas.")
-
-    def update_confidence_gauge(self):
-        pid=self.selected_count_product()
-        if pid:self.show_product_confidence(self.db.product(pid))
 
     def selected_count_product(self):
         selected=self.count_tree.selection() if hasattr(self,"count_tree") else ();return int(selected[0]) if selected else None
@@ -701,8 +685,6 @@ class EstoqueApp(ctk.CTk):
         self.count_confidence_cells.set_scores(visible_scores)
         average=round(total_score/len(all_items)) if all_items else 0
         for label,text in zip(self.count_cards,(str(pending),str(counted_today),str(differences_today),f"{average}%")):label.configure(text=text)
-        if hasattr(self,"confidence_gauge") and not self.count_tree.selection():
-            self.confidence_gauge.set_score(average if all_items else None);self.confidence_title.configure(text="Confiança média do estoque");self.confidence_description.configure(text="Visão geral calculada a partir de todos os produtos cadastrados." if all_items else "Cadastre um produto para começar a medir a confiança do estoque.")
 
     def movements_page(self):
         page=ctk.CTkFrame(self.content,fg_color="transparent");PageTitle(page,"Movimentações","Registre entradas, saídas, ajustes e contagens de inventário.").pack(fill="x",pady=(0,22));body=ctk.CTkFrame(page,fg_color="transparent");body.pack(fill="both",expand=True);body.grid_columnconfigure(1,weight=1);body.grid_rowconfigure(0,weight=1)
@@ -775,7 +757,6 @@ class EstoqueApp(ctk.CTk):
 
     def change_theme(self,value):
         self.settings["theme"]=value;self.save_settings();ctk.set_appearance_mode(value);self.configure_tables()
-        if hasattr(self,"confidence_gauge"):self.confidence_gauge.redraw()
         if hasattr(self,"stock_confidence_cells"):self.stock_confidence_cells.schedule()
         if hasattr(self,"count_confidence_cells"):self.count_confidence_cells.schedule()
     def check_updates(self):
