@@ -15,6 +15,10 @@ def _resource_path(relative_path: str) -> Path:
     return base / relative_path
 
 
+def application_icon_path() -> Path:
+    return _resource_path("assets/brand/estoque-bolsas-baby.ico")
+
+
 def _app_icon_image() -> Image.Image:
     source_path = _resource_path("assets/brand/icone-aplicativo.png")
     with Image.open(source_path) as source_file:

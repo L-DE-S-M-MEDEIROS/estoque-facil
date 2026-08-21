@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import app
 from cloud_sync import CloudSync
-from premium_icons import app_icon
+from premium_icons import app_icon, application_icon_path
 from PIL import Image
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
 from premium_widgets import count_age_color, stock_quantity_color
@@ -297,6 +297,11 @@ class BrandAssetTests(unittest.TestCase):
             self.assertEqual(company_logo.size, (1774, 887))
         with Image.open(root / "assets" / "brand" / "icone-aplicativo.png") as application_icon:
             self.assertEqual(application_icon.size, (1254, 1254))
+
+    def test_native_window_icon_uses_packaged_multisize_ico(self):
+        with Image.open(application_icon_path()) as native_icon:
+            self.assertIn((16, 16), native_icon.info["sizes"])
+            self.assertIn((256, 256), native_icon.info["sizes"])
 
 
 if __name__ == "__main__":

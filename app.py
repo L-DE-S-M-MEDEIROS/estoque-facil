@@ -17,14 +17,14 @@ from tkinter import filedialog, messagebox, ttk
 import customtkinter as ctk
 from PIL import ImageTk
 
-from premium_icons import app_icon, brand_mark, icon
+from premium_icons import app_icon, application_icon_path, brand_mark, icon
 from premium_widgets import MaskedDateEntry, TreeConfidenceOverlay, TreeRelativeDateOverlay, TreeRowSeparatorOverlay, TreeStockOverlay, confidence_tier
 from cloud_sync import CloudSync, CloudSyncError
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.1.8"
+APP_VERSION = "1.1.9"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -648,7 +648,22 @@ class PageTitle(ctk.CTkFrame):
         ctk.CTkLabel(self, text=subtitle, text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 12)).pack(anchor="w", pady=(5, 0))
 
 
-class ProductDialog(ctk.CTkToplevel):
+def apply_window_icon(window: tk.Misc) -> None:
+    window._application_icon_photo = ImageTk.PhotoImage(app_icon(256))
+    window.iconphoto(True, window._application_icon_photo)
+    try:
+        window.iconbitmap(str(application_icon_path()))
+    except tk.TclError:
+        pass
+
+
+class BrandedToplevel(ctk.CTkToplevel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        apply_window_icon(self)
+
+
+class ProductDialog(BrandedToplevel):
     def __init__(self, parent: "EstoqueApp", product: sqlite3.Row | None = None):
         super().__init__(parent, fg_color=COLORS["background"])
         self.parent, self.product, self.result = parent, product, None
@@ -712,7 +727,7 @@ class ProductDialog(ctk.CTkToplevel):
         self.result = {"name": name, "category": self.category.get().strip(), "group_name": group_name, "variant": self.variant.get().strip(), "unit": self.unit.get(), "minimum": minimum, "photo": photo, "notes": self.notes.get("1.0", "end").strip()}; self.destroy()
 
 
-class GroupManagerDialog(ctk.CTkToplevel):
+class GroupManagerDialog(BrandedToplevel):
     def __init__(self, parent: "EstoqueApp"):
         super().__init__(parent, fg_color=COLORS["background"])
         self.parent=parent;self.selected_id: int|None=None;self.title("Gerenciar grupos")
@@ -746,7 +761,7 @@ class GroupManagerDialog(ctk.CTkToplevel):
         self.new_group();self.refresh();self.parent.refresh_all()
 
 
-class UserManagerDialog(ctk.CTkToplevel):
+class UserManagerDialog(BrandedToplevel):
     def __init__(self, parent: "EstoqueApp"):
         super().__init__(parent, fg_color=COLORS["background"])
         self.parent = parent; self.selected_id: int | None = None
@@ -794,7 +809,7 @@ class UserManagerDialog(ctk.CTkToplevel):
         self.new_user();self.refresh();self.parent.refresh_user_controls()
 
 
-class ProductManagerDialog(ctk.CTkToplevel):
+class ProductManagerDialog(BrandedToplevel):
     def __init__(self,parent:"EstoqueApp"):
         super().__init__(parent,fg_color=COLORS["background"]);self.parent=parent;self.title("Gerenciar produtos")
         scale=parent.ui_scale;width,height=round(920*scale),round(560*scale);self.geometry(f"{width}x{height}+{parent.winfo_x()+60}+{parent.winfo_y()+65}");self.minsize(round(780*scale),round(480*scale));self.transient(parent);self.grab_set();self.grid_columnconfigure(0,weight=1);self.grid_rowconfigure(1,weight=1)
@@ -828,7 +843,7 @@ class ProductManagerDialog(ctk.CTkToplevel):
         self.refresh();self.parent.refresh_all()
 
 
-class OperationManagerDialog(ctk.CTkToplevel):
+class OperationManagerDialog(BrandedToplevel):
     EFFECT_LABELS = {
         "positive": "Soma ao estoque (+)",
         "negative": "Retira do estoque (−)",
@@ -929,7 +944,7 @@ class OperationManagerDialog(ctk.CTkToplevel):
         self.new_operation(); self.refresh(); self.parent.refresh_operation_controls()
 
 
-class MovementDialog(ctk.CTkToplevel):
+class MovementDialog(BrandedToplevel):
     def __init__(self, parent: "EstoqueApp", movement: sqlite3.Row):
         super().__init__(parent, fg_color=COLORS["background"])
         self.parent, self.movement, self.result = parent, movement, None
@@ -1003,7 +1018,7 @@ class MovementDialog(ctk.CTkToplevel):
         self.destroy()
 
 
-class CloudLoginDialog(ctk.CTkToplevel):
+class CloudLoginDialog(BrandedToplevel):
     def __init__(self, parent: "EstoqueApp"):
         super().__init__(parent, fg_color=COLORS["background"])
         self.parent = parent
@@ -1067,7 +1082,7 @@ class EstoqueApp(ctk.CTk):
         self._normal_geometry = visible_window_geometry(self.settings.get("window_geometry"), self.work_areas, self.minimum_width, self.minimum_height)
         self.geometry(self._normal_geometry)
         self._last_window_state = self.settings.get("window_state", "zoomed") if self.settings.get("window_state") in ("normal", "zoomed") else "zoomed"
-        self.iconphoto(True, ImageTk.PhotoImage(app_icon(256))); self.protocol("WM_DELETE_WINDOW", self.close)
+        apply_window_icon(self); self.protocol("WM_DELETE_WINDOW", self.close)
         self.brand_icon = brand_mark(86)
         self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "simulation", "count", "settings", "registration", "user", "operation", "group", "plus", "search", "edit", "trash", "download", "upload", "refresh", "collapse", "expand")}
         self.table_separators: list[TreeRowSeparatorOverlay] = []
