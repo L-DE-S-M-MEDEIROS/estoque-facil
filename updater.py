@@ -246,6 +246,16 @@ def replace_installed_executable(target: Path, downloaded: Path, expected_sha256
         staging.unlink(missing_ok=True)
 
 
+def refresh_windows_shell_icons() -> None:
+    """Ask Explorer to discard cached executable and shortcut icons after an update."""
+    if os.name != "nt":
+        return
+    try:
+        ctypes.WinDLL("shell32", use_last_error=True).SHChangeNotify(0x08000000, 0, None, None)
+    except OSError:
+        pass
+
+
 def _safe_update_directory(value: str) -> Path | None:
     candidate = Path(value).resolve()
     temp_root = Path(tempfile.gettempdir()).resolve()
@@ -266,6 +276,7 @@ def run_update_helper(arguments: list[str]) -> bool:
         raise UpdateError("A pasta temporária da atualização é inválida.")
     _wait_for_process_exit(pid)
     replace_installed_executable(target, downloaded, expected_sha256)
+    refresh_windows_shell_icons()
     downloaded.unlink(missing_ok=True)
     subprocess.Popen(
         [str(target), "--cleanup-update", str(update_dir)],

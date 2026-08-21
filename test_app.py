@@ -9,6 +9,7 @@ from unittest.mock import patch
 import app
 from cloud_sync import CloudSync
 from premium_icons import app_icon
+from PIL import Image
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
 from premium_widgets import count_age_color, stock_quantity_color
 
@@ -289,6 +290,13 @@ class BrandAssetTests(unittest.TestCase):
         self.assertEqual(image.mode, "RGBA")
         self.assertEqual(image.getpixel((0, 0))[3], 0)
         self.assertGreater(image.getpixel((32, 32))[2], image.getpixel((32, 32))[0])
+
+    def test_company_logo_is_separate_from_application_icon(self):
+        root = Path(__file__).resolve().parent
+        with Image.open(root / "assets" / "brand" / "icone-bolsas-baby.png") as company_logo:
+            self.assertEqual(company_logo.size, (1774, 887))
+        with Image.open(root / "assets" / "brand" / "icone-aplicativo.png") as application_icon:
+            self.assertEqual(application_icon.size, (1254, 1254))
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraf
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.1.7"
+APP_VERSION = "1.1.8"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -1068,7 +1068,7 @@ class EstoqueApp(ctk.CTk):
         self.geometry(self._normal_geometry)
         self._last_window_state = self.settings.get("window_state", "zoomed") if self.settings.get("window_state") in ("normal", "zoomed") else "zoomed"
         self.iconphoto(True, ImageTk.PhotoImage(app_icon(256))); self.protocol("WM_DELETE_WINDOW", self.close)
-        self.brand_icon = brand_mark(72)
+        self.brand_icon = brand_mark(86)
         self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "simulation", "count", "settings", "registration", "user", "operation", "group", "plus", "search", "edit", "trash", "download", "upload", "refresh", "collapse", "expand")}
         self.table_separators: list[TreeRowSeparatorOverlay] = []
         self.update_events: queue.Queue = queue.Queue(); self.update_busy = False; self.update_button = None
@@ -1119,8 +1119,8 @@ class EstoqueApp(ctk.CTk):
     def build_shell(self):
         self.grid_columnconfigure(1, weight=1); self.grid_rowconfigure(0, weight=1)
         self.sidebar = ctk.CTkFrame(self, width=265, corner_radius=0, fg_color=COLORS["sidebar"]); self.sidebar.grid(row=0, column=0, sticky="nsw"); self.sidebar.grid_propagate(False)
-        logo = ctk.CTkFrame(self.sidebar, fg_color="transparent"); logo.pack(fill="x", padx=24, pady=(22, 25))
-        ctk.CTkLabel(logo, text="", image=self.brand_icon, width=72, height=72).pack(side="left")
+        logo = ctk.CTkFrame(self.sidebar, fg_color="transparent"); logo.pack(fill="x", padx=24, pady=(28, 34))
+        ctk.CTkLabel(logo, text="", image=self.brand_icon, width=86, height=46).pack(side="left")
         brand = ctk.CTkFrame(logo, fg_color="transparent"); brand.pack(side="left", padx=13)
         ctk.CTkLabel(brand, text="ESTOQUE", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 16, "bold")).pack(anchor="w")
         ctk.CTkLabel(brand, text="BOLSAS BABY", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10, "bold")).pack(anchor="w", pady=(2,0))

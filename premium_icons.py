@@ -15,16 +15,29 @@ def _resource_path(relative_path: str) -> Path:
     return base / relative_path
 
 
-def _brand_image() -> Image.Image:
-    source_path = _resource_path("assets/brand/icone-bolsas-baby.png")
+def _app_icon_image() -> Image.Image:
+    source_path = _resource_path("assets/brand/icone-aplicativo.png")
     with Image.open(source_path) as source_file:
         return source_file.convert("RGBA")
 
 
-def brand_mark(display_size: int = 72) -> ctk.CTkImage:
-    """Use the supplied blue bag artwork as the in-app brand mark."""
-    source = _brand_image()
-    return ctk.CTkImage(light_image=source, dark_image=source, size=(display_size, display_size))
+def brand_mark(display_width: int = 86) -> ctk.CTkImage:
+    """Create a theme-aware monochrome mark from the Bolsas Baby company logo."""
+    source_path = _resource_path("assets/brand/icone-bolsas-baby.png")
+    with Image.open(source_path) as source_file:
+        source = source_file.convert("RGBA")
+
+    illustration = source.crop((0, 0, source.width, round(source.height * .65)))
+    bounds = illustration.getchannel("A").getbbox()
+    if bounds:
+        illustration = illustration.crop(bounds)
+    alpha = illustration.getchannel("A")
+    light = Image.new("RGBA", illustration.size, (0, 0, 0, 0))
+    dark = Image.new("RGBA", illustration.size, (255, 255, 255, 0))
+    light.putalpha(alpha)
+    dark.putalpha(alpha)
+    display_height = max(24, round(display_width * illustration.height / illustration.width))
+    return ctk.CTkImage(light_image=light, dark_image=dark, size=(display_width, display_height))
 
 
 def _draw_icon(name: str, color: str, size: int = 256) -> Image.Image:
@@ -119,4 +132,4 @@ def icon(name: str, display_size: int = 22) -> ctk.CTkImage:
 
 
 def app_icon(size: int = 256) -> Image.Image:
-    return _brand_image().resize((size, size), Image.Resampling.LANCZOS)
+    return _app_icon_image().resize((size, size), Image.Resampling.LANCZOS)
