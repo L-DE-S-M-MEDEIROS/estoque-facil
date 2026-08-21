@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import sqlite3
 import urllib.error
@@ -21,6 +22,7 @@ TABLES = (
     "movement_batches",
     "movements",
 )
+SHARED_WORKSPACE_KEY = "bolsas-baby"
 
 
 class CloudSyncError(RuntimeError):
@@ -124,32 +126,58 @@ class CloudSync:
             "photos": photos,
         }
 
-    def upload(self, connection: sqlite3.Connection) -> dict:
-        payload = self.export_payload(connection)
+    @staticmethod
+    def payload_fingerprint(payload: dict) -> str:
+        stable = dict(payload)
+        stable.pop("exported_at", None)
+        serialized = json.dumps(stable, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def payload_has_user_data(payload: dict) -> bool:
+        tables = payload.get("tables") or {}
+        return any(tables.get(name) for name in ("products", "movements", "movement_batches", "users", "product_groups"))
+
+    def _remember_sync(self, payload: dict, snapshot: dict) -> None:
+        self.settings["cloud_last_fingerprint"] = self.payload_fingerprint(payload)
+        self.settings["cloud_last_revision"] = int(snapshot.get("revision") or 1)
+        self.settings["cloud_last_remote_updated_at"] = str(snapshot.get("updated_at") or "")
+        self.settings.pop("cloud_local_modified_at", None)
+
+    def _upload_payload(self, payload: dict, revision: int) -> dict:
         body = {
-            "owner_id": self.settings["cloud_user_id"],
+            "workspace_key": SHARED_WORKSPACE_KEY,
             "payload": payload,
+            "revision": max(1, revision),
             "device_id": self.device_id,
+            "updated_by": self.settings["cloud_user_id"],
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         result = self._request(
-            "/rest/v1/inventory_snapshots?on_conflict=owner_id",
+            "/rest/v1/shared_inventory_snapshot?on_conflict=workspace_key",
             method="POST",
             body=body,
             authenticated=True,
             headers={"Prefer": "resolution=merge-duplicates,return=representation"},
         )
-        return result[0] if result else body
+        snapshot = result[0] if result else body
+        self._remember_sync(payload, snapshot)
+        return snapshot
+
+    def upload(self, connection: sqlite3.Connection) -> dict:
+        payload = self.export_payload(connection)
+        remote = self.remote_snapshot()
+        return self._upload_payload(payload, int((remote or {}).get("revision") or 0) + 1)
 
     def remote_snapshot(self) -> dict | None:
-        query = urllib.parse.urlencode({"select": "payload,updated_at,device_id", "owner_id": f"eq.{self.settings['cloud_user_id']}"})
-        rows = self._request(f"/rest/v1/inventory_snapshots?{query}", authenticated=True)
+        query = urllib.parse.urlencode({
+            "select": "payload,revision,updated_at,device_id,updated_by",
+            "workspace_key": f"eq.{SHARED_WORKSPACE_KEY}",
+        })
+        rows = self._request(f"/rest/v1/shared_inventory_snapshot?{query}", authenticated=True)
         return rows[0] if rows else None
 
-    def download(self, connection: sqlite3.Connection) -> str:
-        snapshot = self.remote_snapshot()
-        if not snapshot:
-            raise CloudSyncError("Ainda não existe uma cópia desses dados no Supabase.")
+    def _download_snapshot(self, connection: sqlite3.Connection, snapshot: dict) -> str:
         payload = snapshot["payload"]
         if payload.get("format") != 1:
             raise CloudSyncError("A cópia na nuvem usa um formato incompatível.")
@@ -184,4 +212,52 @@ class CloudSync:
             backup_connection.close()
             connection.execute("PRAGMA foreign_keys=ON")
             raise
+        self._remember_sync(payload, snapshot)
         return str(snapshot["updated_at"])
+
+    def download(self, connection: sqlite3.Connection) -> str:
+        snapshot = self.remote_snapshot()
+        if not snapshot:
+            raise CloudSyncError("Ainda não existe uma cópia compartilhada no Supabase.")
+        return self._download_snapshot(connection, snapshot)
+
+    def synchronize(self, connection: sqlite3.Connection, prefer_local: bool = False) -> dict:
+        """Keep this device aligned with the single inventory shared by authenticated users."""
+        local_payload = self.export_payload(connection)
+        local_fingerprint = self.payload_fingerprint(local_payload)
+        remote = self.remote_snapshot()
+        if remote is None:
+            snapshot = self._upload_payload(local_payload, 1)
+            return {"action": "uploaded", "snapshot": snapshot}
+
+        remote_payload = remote.get("payload") or {}
+        if remote_payload.get("format") != 1:
+            raise CloudSyncError("A cópia compartilhada usa um formato incompatível.")
+        remote_fingerprint = self.payload_fingerprint(remote_payload)
+        last_fingerprint = str(self.settings.get("cloud_last_fingerprint") or "")
+        remote_revision = int(remote.get("revision") or 1)
+
+        if local_fingerprint == remote_fingerprint:
+            self._remember_sync(remote_payload, remote)
+            return {"action": "unchanged", "snapshot": remote}
+        if prefer_local and self.payload_has_user_data(local_payload):
+            snapshot = self._upload_payload(local_payload, remote_revision + 1)
+            return {"action": "uploaded", "snapshot": snapshot}
+        if not self.payload_has_user_data(local_payload) and self.payload_has_user_data(remote_payload):
+            updated_at = self._download_snapshot(connection, remote)
+            return {"action": "downloaded", "updated_at": updated_at, "snapshot": remote}
+        if last_fingerprint:
+            if local_fingerprint == last_fingerprint:
+                updated_at = self._download_snapshot(connection, remote)
+                return {"action": "downloaded", "updated_at": updated_at, "snapshot": remote}
+            if remote_fingerprint == last_fingerprint:
+                snapshot = self._upload_payload(local_payload, remote_revision + 1)
+                return {"action": "uploaded", "snapshot": snapshot}
+
+        local_modified = str(self.settings.get("cloud_local_modified_at") or "")
+        remote_modified = str(remote.get("updated_at") or "")
+        if remote_modified and (not local_modified or remote_modified >= local_modified):
+            updated_at = self._download_snapshot(connection, remote)
+            return {"action": "downloaded", "updated_at": updated_at, "snapshot": remote}
+        snapshot = self._upload_payload(local_payload, remote_revision + 1)
+        return {"action": "uploaded", "snapshot": snapshot}

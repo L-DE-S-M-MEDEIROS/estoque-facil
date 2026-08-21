@@ -28,6 +28,10 @@ CLOUD_SESSION_KEYS = frozenset(
         "cloud_user_id",
         "cloud_email",
         "cloud_device_id",
+        "cloud_last_fingerprint",
+        "cloud_last_revision",
+        "cloud_last_remote_updated_at",
+        "cloud_local_modified_at",
     }
 )
 

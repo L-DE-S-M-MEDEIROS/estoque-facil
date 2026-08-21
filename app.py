@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import ctypes
-import json
 import math
+import queue
 import re
 import shutil
 import sqlite3
 import sys
+import threading
 import unicodedata
-import urllib.error
-import urllib.request
-import webbrowser
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -23,9 +21,10 @@ from premium_icons import app_icon, brand_mark, icon
 from premium_widgets import MaskedDateEntry, TreeConfidenceOverlay, TreeRelativeDateOverlay, TreeRowSeparatorOverlay, TreeStockOverlay, confidence_tier
 from cloud_sync import CloudSync, CloudSyncError
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
+from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.1.6"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -291,6 +290,12 @@ class Database:
             SELECT id FROM operation_types WHERE legacy_type=movements.type
         ) WHERE operation_id IS NULL""")
         self.db.commit()
+        self.on_change = None
+        self.db.set_trace_callback(self._track_change)
+
+    def _track_change(self, statement: str) -> None:
+        if self.on_change and re.match(r"^\s*(INSERT|UPDATE|DELETE)\b", statement, re.IGNORECASE):
+            self.on_change()
 
     def operations(self, include_inactive: bool = False, custom_only: bool = False) -> list[sqlite3.Row]:
         conditions = []
@@ -1029,7 +1034,7 @@ class CloudLoginDialog(ctk.CTkToplevel):
         if not credentials:return
         try:self.parent.cloud.sign_in(*credentials);self.parent.save_cloud_settings()
         except CloudSyncError as error:messagebox.showerror(APP_NAME,str(error),parent=self);return
-        self.destroy();self.parent.update_cloud_status();messagebox.showinfo(APP_NAME,"Conta conectada. Agora envie os dados locais para a nuvem.",parent=self.parent)
+        self.destroy();self.parent.update_cloud_status();self.parent.start_cloud_sync(silent=False,prefer_local=True)
 
     def sign_up(self):
         credentials=self.credentials()
@@ -1037,7 +1042,7 @@ class CloudLoginDialog(ctk.CTkToplevel):
         try:signed_in=self.parent.cloud.sign_up(*credentials);self.parent.save_cloud_settings()
         except CloudSyncError as error:messagebox.showerror(APP_NAME,str(error),parent=self);return
         if signed_in:
-            self.destroy();self.parent.update_cloud_status();messagebox.showinfo(APP_NAME,"Conta criada e conectada.",parent=self.parent)
+            self.destroy();self.parent.update_cloud_status();self.parent.start_cloud_sync(silent=False,prefer_local=True)
         else:
             messagebox.showinfo(APP_NAME,"Conta criada. Confirme o e-mail recebido e depois use o botão Entrar.",parent=self)
 
@@ -1054,7 +1059,7 @@ class EstoqueApp(ctk.CTk):
         self.settings = self.preferences_store.values
         self.cloud_settings = self.cloud_session_store.values
         ctk.set_appearance_mode(self.settings.get("theme", "Light"))
-        self.db = Database(); self.cloud = CloudSync(data_dir(), self.cloud_settings); self.save_cloud_settings(); self.title(f"{APP_NAME} — v{APP_VERSION}")
+        self.db = Database(); self.cloud = CloudSync(data_dir(), self.cloud_settings); self.db.on_change = self.schedule_cloud_sync; self.save_cloud_settings(); self.title(f"{APP_NAME} — v{APP_VERSION}")
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight(); self.work_areas = monitor_work_areas(sw, sh)
         primary = self.work_areas[0]; work_width, work_height = primary[2]-primary[0], primary[3]-primary[1]
         self.minimum_width = min(work_width, round(1050*self.ui_scale)); self.minimum_height = min(work_height, round(680*self.ui_scale))
@@ -1066,9 +1071,14 @@ class EstoqueApp(ctk.CTk):
         self.brand_icon = brand_mark(86)
         self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "simulation", "count", "settings", "registration", "user", "operation", "group", "plus", "search", "edit", "trash", "download", "upload", "refresh", "collapse", "expand")}
         self.table_separators: list[TreeRowSeparatorOverlay] = []
+        self.update_events: queue.Queue = queue.Queue(); self.update_busy = False; self.update_button = None
+        self.cloud_events: queue.Queue = queue.Queue(); self.cloud_sync_busy = False; self.cloud_sync_pending = False; self.cloud_sync_timer = None
         self.nav_buttons = {}; self.pages = {}; self.current_page = ""; self.build_shell(); self.show_page(self.settings.get("last_page", "stock"))
         self.bind("<Configure>", self.remember_window_geometry)
         self.after_idle(self.restore_window)
+        self.after(2500, lambda: self.check_updates(silent=True))
+        self.after(4000, lambda: self.start_cloud_sync(silent=True))
+        self.after(20000, self.periodic_cloud_sync)
 
     def save_settings(self): self.preferences_store.save(); self.settings = self.preferences_store.values
 
@@ -1703,13 +1713,17 @@ class EstoqueApp(ctk.CTk):
         ctk.CTkButton(cloud_actions,text="Enviar dados",width=115,height=38,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.cloud_upload).pack(side="left",padx=4)
         ctk.CTkButton(cloud_actions,text="Baixar dados",width=115,height=38,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.cloud_download).pack(side="left",padx=4)
         actions=ctk.CTkFrame(page,fg_color="transparent");actions.pack(fill="both",expand=True);actions.grid_columnconfigure((0,1),weight=1)
-        for index,(title,text,icon_name,command,button) in enumerate((("Atualizações",f"Versão instalada: {APP_VERSION}.","refresh",self.check_updates,"Buscar atualização"),("Backup dos dados","Salve uma cópia segura do banco local.","download",self.backup,"Baixar backup"),("Restaurar backup","Substitua os dados por um backup anterior.","upload",self.restore,"Restaurar backup"))):
-            card=Card(actions);card.grid(row=index//2,column=index%2,sticky="nsew",padx=(0 if index%2==0 else 8,8 if index%2==0 else 0),pady=8);ctk.CTkLabel(card,text=title,image=self.icons[icon_name],compound="left",text_color=COLORS["text"],font=ctk.CTkFont("Inter",14,"bold")).pack(anchor="w",padx=20,pady=(20,5));ctk.CTkLabel(card,text=text,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(anchor="w",padx=20);ctk.CTkButton(card,text=button,height=38,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=command).pack(anchor="w",padx=20,pady=20)
+        for index,(title,text,icon_name,command,button) in enumerate((("Atualizações",f"Versão instalada: {APP_VERSION}. Verificação automática ao abrir.","refresh",self.check_updates,"Baixar e instalar atualização"),("Backup dos dados","Salve uma cópia segura do banco local.","download",self.backup,"Baixar backup"),("Restaurar backup","Substitua os dados por um backup anterior.","upload",self.restore,"Restaurar backup"))):
+            card=Card(actions);card.grid(row=index//2,column=index%2,sticky="nsew",padx=(0 if index%2==0 else 8,8 if index%2==0 else 0),pady=8);ctk.CTkLabel(card,text=title,image=self.icons[icon_name],compound="left",text_color=COLORS["text"],font=ctk.CTkFont("Inter",14,"bold")).pack(anchor="w",padx=20,pady=(20,5));ctk.CTkLabel(card,text=text,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(anchor="w",padx=20)
+            action_button=ctk.CTkButton(card,text=button,height=38,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=command);action_button.pack(anchor="w",padx=20,pady=(12,20))
+            if title=="Atualizações":
+                self.update_button=action_button;self.update_status=tk.StringVar(value="O aplicativo procura novas versões sem interromper seu trabalho.")
+                ctk.CTkLabel(card,textvariable=self.update_status,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10),anchor="w").pack(fill="x",padx=20,before=action_button)
         return page
 
     def update_cloud_status(self):
         if hasattr(self,"cloud_status"):
-            self.cloud_status.set(f"Conectado como {self.cloud.email}" if self.cloud.signed_in else "Desconectado — entre ou crie sua conta segura")
+            self.cloud_status.set(f"Conectado como {self.cloud.email} — estoque compartilhado e automático" if self.cloud.signed_in else "Desconectado — entre ou crie sua conta segura")
 
     def cloud_account(self):
         if self.cloud.signed_in:
@@ -1719,7 +1733,7 @@ class EstoqueApp(ctk.CTk):
 
     def cloud_upload(self):
         if not self.cloud.signed_in:CloudLoginDialog(self);return
-        if not messagebox.askyesno(APP_NAME,"Enviar agora os produtos, movimentações, cadastros e fotos para sua conta privada no Supabase?",parent=self):return
+        if not messagebox.askyesno(APP_NAME,"Enviar agora os produtos, movimentações, cadastros e fotos para o estoque compartilhado no Supabase?",parent=self):return
         try:self.cloud.upload(self.db.db);self.save_cloud_settings()
         except CloudSyncError as error:messagebox.showerror(APP_NAME,str(error),parent=self);return
         messagebox.showinfo(APP_NAME,"Dados enviados e protegidos no Supabase.",parent=self)
@@ -1731,6 +1745,48 @@ class EstoqueApp(ctk.CTk):
         except (CloudSyncError,KeyError,ValueError,sqlite3.Error,OSError) as error:messagebox.showerror(APP_NAME,f"Não foi possível baixar os dados.\n\n{error}",parent=self);return
         self.refresh_all();messagebox.showinfo(APP_NAME,f"Dados restaurados da nuvem.\nCópia remota: {updated_at[:19].replace('T',' ')}",parent=self)
 
+    def schedule_cloud_sync(self):
+        if not hasattr(self,"cloud") or not self.cloud.signed_in:return
+        self.cloud_settings["cloud_local_modified_at"]=datetime.now(timezone.utc).isoformat()
+        if getattr(self,"cloud_sync_timer",None) is not None:
+            try:self.after_cancel(self.cloud_sync_timer)
+            except (tk.TclError,ValueError):pass
+        self.cloud_sync_timer=self.after(1800,lambda:self.start_cloud_sync(silent=True))
+
+    def start_cloud_sync(self,silent=True,prefer_local=False):
+        if not self.cloud.signed_in:return
+        if self.cloud_sync_busy:
+            self.cloud_sync_pending=True;return
+        self.cloud_sync_busy=True;self.cloud_sync_pending=False;self.cloud_sync_timer=None
+        if hasattr(self,"cloud_status"):self.cloud_status.set(f"Conectado como {self.cloud.email} — sincronizando...")
+        def worker():
+            connection=sqlite3.connect(self.db.path)
+            try:self.cloud_events.put(("success",self.cloud.synchronize(connection,prefer_local),silent))
+            except CloudSyncError as error:self.cloud_events.put(("error",str(error),silent))
+            except (KeyError,ValueError,sqlite3.Error,OSError) as error:self.cloud_events.put(("error",f"Não foi possível sincronizar: {error}",silent))
+            finally:connection.close()
+        threading.Thread(target=worker,daemon=True).start();self.after(120,self.poll_cloud_sync_events)
+
+    def poll_cloud_sync_events(self):
+        try:event=self.cloud_events.get_nowait()
+        except queue.Empty:
+            if self.cloud_sync_busy:self.after(120,self.poll_cloud_sync_events)
+            return
+        kind,result,silent=event
+        self.cloud_sync_busy=False;self.save_cloud_settings();self.update_cloud_status()
+        if kind=="success":
+            action=result.get("action")
+            if action=="downloaded":self.refresh_all()
+            if not silent:
+                messages={"uploaded":"Dados locais enviados ao estoque compartilhado.","downloaded":"Este computador recebeu os dados mais recentes dos outros usuários.","unchanged":"Todos os usuários já estão sincronizados."}
+                messagebox.showinfo(APP_NAME,messages.get(action,"Sincronização concluída."),parent=self)
+        elif not silent:messagebox.showerror(APP_NAME,result,parent=self)
+        if self.cloud_sync_pending:self.after(300,lambda:self.start_cloud_sync(silent=True))
+
+    def periodic_cloud_sync(self):
+        if self.cloud.signed_in:self.start_cloud_sync(silent=True)
+        self.after(20000,self.periodic_cloud_sync)
+
     def change_theme(self,value):
         self.settings["theme"]=value;self.save_interface_state();ctk.set_appearance_mode(value);self.configure_tables()
         if hasattr(self,"stock_confidence_cells"):self.stock_confidence_cells.schedule()
@@ -1739,12 +1795,63 @@ class EstoqueApp(ctk.CTk):
         if hasattr(self,"simulation_projected_cells"):self.simulation_projected_cells.schedule()
         if hasattr(self,"count_confidence_cells"):self.count_confidence_cells.schedule()
         if hasattr(self,"count_age_cells"):self.count_age_cells.schedule()
-    def check_updates(self):
-        try:
-            req=urllib.request.Request(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",headers={"User-Agent":APP_NAME});release=json.load(urllib.request.urlopen(req,timeout=10));latest=release["tag_name"].lstrip("v")
-            if latest==APP_VERSION:messagebox.showinfo(APP_NAME,"Você já usa a versão mais recente.",parent=self)
-            elif messagebox.askyesno(APP_NAME,f"Versão {latest} disponível. Abrir para baixar?",parent=self):webbrowser.open(release["html_url"])
-        except (urllib.error.URLError,KeyError,TimeoutError):messagebox.showerror(APP_NAME,"Não foi possível consultar o GitHub agora.",parent=self)
+    def set_update_status(self,text):
+        if hasattr(self,"update_status"):self.update_status.set(text)
+    def reset_update_button(self):
+        self.update_busy=False
+        if self.update_button is not None:self.update_button.configure(state="normal",text="Baixar e instalar atualização")
+    def check_updates(self,silent=False):
+        if self.update_busy:
+            if not silent:messagebox.showinfo(APP_NAME,"A verificação já está em andamento.",parent=self)
+            return
+        self.update_busy=True;self.set_update_status("Consultando a publicação oficial no GitHub...")
+        if self.update_button is not None:self.update_button.configure(state="disabled",text="Verificando...")
+        def worker():
+            try:self.update_events.put(("checked",check_for_update(APP_VERSION,GITHUB_REPO),silent))
+            except UpdateError as error:self.update_events.put(("check_error",str(error),silent))
+            except Exception:self.update_events.put(("check_error","Falha inesperada ao buscar atualização.",silent))
+        threading.Thread(target=worker,daemon=True).start();self.after(100,self.poll_update_events)
+    def poll_update_events(self):
+        try:event=self.update_events.get_nowait()
+        except queue.Empty:
+            if self.update_busy:self.after(100,self.poll_update_events)
+            return
+        kind=event[0]
+        if kind=="progress":
+            downloaded,total=event[1],event[2];percent=min(100,int(downloaded*100/total)) if total else 0
+            self.set_update_status(f"Baixando atualização... {percent}%")
+            if self.update_button is not None:self.update_button.configure(text=f"Baixando {percent}%")
+        elif kind=="checked":self.update_check_finished(event[1],event[2])
+        elif kind=="check_error":self.update_failed(event[1],event[2])
+        elif kind=="downloaded":self.install_downloaded_update(event[1],event[2])
+        elif kind=="download_error":self.update_failed(event[1],False)
+        if self.update_busy:self.after(100,self.poll_update_events)
+    def update_check_finished(self,info,silent):
+        self.reset_update_button()
+        if info is None:
+            self.set_update_status(f"Versão {APP_VERSION}: aplicativo atualizado.")
+            if not silent:messagebox.showinfo(APP_NAME,f"Você já usa a versão mais recente ({APP_VERSION}).",parent=self)
+            return
+        self.set_update_status(f"Nova versão disponível: {info.version}")
+        notes=(info.notes[:700]+"…") if len(info.notes)>700 else info.notes
+        if messagebox.askyesno(APP_NAME,f"Nova versão {info.version} disponível.\n\n{notes}\n\nDeseja baixar, substituir a versão anterior e reiniciar agora?",parent=self):self.download_available_update(info)
+    def download_available_update(self,info):
+        self.update_busy=True;self.set_update_status("Preparando download seguro...")
+        if self.update_button is not None:self.update_button.configure(state="disabled",text="Baixando 0%")
+        def progress(downloaded,total):self.update_events.put(("progress",downloaded,total))
+        def worker():
+            try:self.update_events.put(("downloaded",download_update(info,progress),info))
+            except UpdateError as error:self.update_events.put(("download_error",str(error)))
+            except Exception:self.update_events.put(("download_error","Não foi possível concluir o download."))
+        threading.Thread(target=worker,daemon=True).start()
+    def install_downloaded_update(self,path,info):
+        self.set_update_status("Download validado. Substituindo a versão anterior e reiniciando...")
+        try:start_update_install(path,info.sha256)
+        except (UpdateError,OSError) as error:self.update_failed(str(error),False);return
+        self.after(150,self.close)
+    def update_failed(self,error,silent):
+        self.reset_update_button();self.set_update_status(error)
+        if not silent:messagebox.showerror(APP_NAME,error,parent=self)
     def backup(self):
         target=filedialog.asksaveasfilename(parent=self,defaultextension=".db",initialfile=f"estoque-backup-{date.today()}.db",filetypes=[("Backup","*.db")]);
         if target:self.db.backup(Path(target));messagebox.showinfo(APP_NAME,"Backup salvo.",parent=self)
@@ -1765,5 +1872,7 @@ class EstoqueApp(ctk.CTk):
 
 
 if __name__=="__main__":
-    try:enable_dpi_awareness();EstoqueApp().mainloop()
+    try:
+        if run_update_helper(sys.argv):raise SystemExit(0)
+        schedule_update_cleanup(sys.argv);enable_dpi_awareness();EstoqueApp().mainloop()
     except Exception as error:(data_dir()/"erro.log").write_text(f"{datetime.now().isoformat()}\n{error!r}\n",encoding="utf-8");raise

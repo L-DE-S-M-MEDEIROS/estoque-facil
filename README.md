@@ -4,10 +4,11 @@ Aplicativo desktop nativo para Windows, desenvolvido em Python com Tkinter e SQL
 
 ## Sincronização com Supabase
 
-Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** para criar ou entrar em uma conta, enviar os dados locais e restaurar a cópia remota. Produtos, movimentações, cadastros e fotos são enviados ao projeto separado `Estoque Bolsas Baby`.
+Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** para criar ou entrar em uma conta. Todos os usuários autenticados neste aplicativo compartilham o mesmo estoque, e produtos, movimentações, cadastros e fotos são sincronizados automaticamente no projeto separado `Estoque Bolsas Baby`.
 
 - O aplicativo continua funcionando localmente sem internet.
-- Cada conta acessa somente a própria cópia por meio de Row Level Security (RLS).
+- Todas as contas autenticadas do aplicativo acessam o estoque compartilhado; usuários anônimos continuam bloqueados por Row Level Security (RLS).
+- Ao entrar, ao alterar dados e a cada 20 segundos, o aplicativo compara a cópia local com a nuvem e atualiza os outros computadores.
 - A senha não é armazenada; somente a sessão de acesso fica salva neste computador.
 - Antes de baixar e substituir os dados locais, o aplicativo cria um backup automático.
 - A aba **Movimentações** possui rolagem vertical e permite recolher ou expandir a lista pesquisável de produtos.
@@ -42,7 +43,8 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Histórico completo de movimentações
 - Backup e restauração do banco SQLite
 - A exclusão geral de todos os dados não fica disponível na interface
-- Consulta de atualizações pelo GitHub
+- Verificação automática de atualizações ao abrir, com aviso quando houver uma nova versão
+- Download seguro pelo próprio aplicativo, validação SHA-256, substituição da versão anterior e reinício automático
 - Interface adaptável a Full HD, 2K e 4K, respeitando a escala de DPI do Windows
 - Temas Light off-white e Dark grafite com azul neon
 - Preferências da interface salvas localmente por usuário do Windows, separadas da sessão e dos dados sincronizados pelo Supabase

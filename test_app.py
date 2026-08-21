@@ -4,6 +4,7 @@ from datetime import date, timedelta
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import app
 from cloud_sync import CloudSync
@@ -231,6 +232,53 @@ class LocalStateTests(unittest.TestCase):
         preferences.save()
 
         self.assertEqual(LocalPreferences(path).values["last_page"], "simulation")
+
+
+class SharedCloudSyncTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.settings = {
+            "cloud_access_token": "token",
+            "cloud_user_id": "00000000-0000-0000-0000-000000000001",
+            "cloud_device_id": "00000000-0000-0000-0000-000000000002",
+        }
+        self.sync = CloudSync(Path(self.temporary_directory.name), self.settings)
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    @staticmethod
+    def payload(product_name=""):
+        tables = {name: [] for name in ("operation_types", "users", "product_groups", "products", "movement_batches", "movements")}
+        if product_name:
+            tables["products"] = [{"id": 1, "name": product_name}]
+        return {"format": 1, "app": "Estoque Bolsas Baby", "exported_at": "agora", "tables": tables, "photos": {}}
+
+    def test_payload_fingerprint_ignores_export_time(self):
+        first = self.payload("MARINHO")
+        second = dict(first, exported_at="depois")
+        self.assertEqual(self.sync.payload_fingerprint(first), self.sync.payload_fingerprint(second))
+
+    def test_upload_targets_shared_workspace_for_every_authenticated_user(self):
+        payload = self.payload("CARAMELO")
+        with patch.object(self.sync, "_request", return_value=[{"revision": 3, "updated_at": "2026-08-21T15:00:00+00:00"}]) as request:
+            self.sync._upload_payload(payload, 3)
+        path = request.call_args.args[0]
+        body = request.call_args.kwargs["body"]
+        self.assertIn("shared_inventory_snapshot", path)
+        self.assertEqual(body["workspace_key"], "bolsas-baby")
+        self.assertEqual(body["updated_by"], self.settings["cloud_user_id"])
+        self.assertNotIn("owner_id", body)
+
+    def test_remote_change_is_downloaded_when_local_matches_last_sync(self):
+        local = self.payload("MARINHO")
+        remote_payload = self.payload("VERDE")
+        self.settings["cloud_last_fingerprint"] = self.sync.payload_fingerprint(local)
+        remote = {"payload": remote_payload, "revision": 4, "updated_at": "2026-08-21T15:00:00+00:00"}
+        with patch.object(self.sync, "export_payload", return_value=local), patch.object(self.sync, "remote_snapshot", return_value=remote), patch.object(self.sync, "_download_snapshot", return_value=remote["updated_at"]) as download:
+            result = self.sync.synchronize(object())
+        self.assertEqual(result["action"], "downloaded")
+        download.assert_called_once()
 
 
 if __name__ == "__main__":
