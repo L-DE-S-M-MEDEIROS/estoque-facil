@@ -24,7 +24,7 @@ from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraf
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.1.9"
+APP_VERSION = "1.1.10"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {

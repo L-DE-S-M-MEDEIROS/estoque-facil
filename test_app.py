@@ -301,6 +301,10 @@ class BrandAssetTests(unittest.TestCase):
     def test_native_window_icon_uses_packaged_multisize_ico(self):
         with Image.open(application_icon_path()) as native_icon:
             self.assertIn((16, 16), native_icon.info["sizes"])
+            self.assertIn((20, 20), native_icon.info["sizes"])
+            self.assertIn((24, 24), native_icon.info["sizes"])
+            self.assertIn((32, 32), native_icon.info["sizes"])
+            self.assertIn((40, 40), native_icon.info["sizes"])
             self.assertIn((256, 256), native_icon.info["sizes"])
 
 
