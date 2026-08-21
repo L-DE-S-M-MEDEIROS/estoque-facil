@@ -15,25 +15,16 @@ def _resource_path(relative_path: str) -> Path:
     return base / relative_path
 
 
-def brand_mark(display_width: int = 86) -> ctk.CTkImage:
-    """Create a theme-aware monochrome mark from the supplied Bolsas Baby logo."""
+def _brand_image() -> Image.Image:
     source_path = _resource_path("assets/brand/icone-bolsas-baby.png")
     with Image.open(source_path) as source_file:
-        source = source_file.convert("RGBA")
+        return source_file.convert("RGBA")
 
-    # The upper part is the baby-and-birds illustration; the lettering remains
-    # as live UI text beside it so it stays crisp at every Windows DPI scale.
-    illustration = source.crop((0, 0, source.width, round(source.height * .65)))
-    bounds = illustration.getchannel("A").getbbox()
-    if bounds:
-        illustration = illustration.crop(bounds)
-    alpha = illustration.getchannel("A")
-    light = Image.new("RGBA", illustration.size, (0, 0, 0, 0))
-    dark = Image.new("RGBA", illustration.size, (255, 255, 255, 0))
-    light.putalpha(alpha)
-    dark.putalpha(alpha)
-    display_height = max(24, round(display_width * illustration.height / illustration.width))
-    return ctk.CTkImage(light_image=light, dark_image=dark, size=(display_width, display_height))
+
+def brand_mark(display_size: int = 72) -> ctk.CTkImage:
+    """Use the supplied blue bag artwork as the in-app brand mark."""
+    source = _brand_image()
+    return ctk.CTkImage(light_image=source, dark_image=source, size=(display_size, display_size))
 
 
 def _draw_icon(name: str, color: str, size: int = 256) -> Image.Image:
@@ -128,10 +119,4 @@ def icon(name: str, display_size: int = 22) -> ctk.CTkImage:
 
 
 def app_icon(size: int = 256) -> Image.Image:
-    image = Image.new("RGBA", (size, size), "#111827")
-    draw = ImageDraw.Draw(image)
-    width = max(10, size // 17)
-    draw.rounded_rectangle((size*.17, size*.24, size*.83, size*.77), radius=size*.09, outline="#64C7FF", width=width)
-    draw.line((size*.17, size*.38, size*.5, size*.52, size*.83, size*.38), fill="#64C7FF", width=width, joint="curve")
-    draw.line((size*.5, size*.52, size*.5, size*.77), fill="#64C7FF", width=width)
-    return image
+    return _brand_image().resize((size, size), Image.Resampling.LANCZOS)

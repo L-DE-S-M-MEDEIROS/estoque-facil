@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import app
 from cloud_sync import CloudSync
+from premium_icons import app_icon
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
 from premium_widgets import count_age_color, stock_quantity_color
 
@@ -279,6 +280,15 @@ class SharedCloudSyncTests(unittest.TestCase):
             result = self.sync.synchronize(object())
         self.assertEqual(result["action"], "downloaded")
         download.assert_called_once()
+
+
+class BrandAssetTests(unittest.TestCase):
+    def test_app_icon_uses_new_transparent_square_artwork(self):
+        image = app_icon(64)
+        self.assertEqual(image.size, (64, 64))
+        self.assertEqual(image.mode, "RGBA")
+        self.assertEqual(image.getpixel((0, 0))[3], 0)
+        self.assertGreater(image.getpixel((32, 32))[2], image.getpixel((32, 32))[0])
 
 
 if __name__ == "__main__":
