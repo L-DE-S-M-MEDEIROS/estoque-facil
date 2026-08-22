@@ -24,7 +24,7 @@ from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraf
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.1.10"
+APP_VERSION = "1.1.11"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -209,6 +209,30 @@ def simulated_stock(current_stock: float, quantity: float, operation: str) -> fl
     if amount <= 0 or not math.isfinite(amount):
         raise ValueError("A quantidade deve ser maior que zero.")
     return current + amount if operation == "entrada" else current - amount
+
+
+def simulation_stock_comparison(products, items, operation: str) -> list[dict]:
+    """Build a complete before-and-after stock position for a simulation."""
+
+    if operation not in ("entrada", "saida"):
+        raise ValueError("Operação de simulação inválida.")
+    quantities = {int(item["product_id"]): float(item["quantity"]) for item in items}
+    comparison = []
+    for product in products:
+        product_id = int(product["id"])
+        current = float(product["stock"])
+        quantity = quantities.get(product_id)
+        projected = current if quantity is None else simulated_stock(current, quantity, operation)
+        comparison.append(
+            {
+                "product": product,
+                "product_id": product_id,
+                "current": current,
+                "quantity": quantity,
+                "projected": projected,
+            }
+        )
+    return comparison
 
 
 class Database:
@@ -1320,11 +1344,13 @@ class EstoqueApp(ctk.CTk):
 
         self.simulation_result_card=Card(page);self.simulation_result_card.pack(fill="both",expand=True)
         result_bar=ctk.CTkFrame(self.simulation_result_card,fg_color="transparent");result_bar.pack(fill="x",padx=20,pady=(16,10))
-        ctk.CTkLabel(result_bar,text="Estoque depois da operação",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(side="left")
+        ctk.CTkLabel(result_bar,text="Comparação simultânea — estoque atual x depois da simulação",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(side="left")
         ctk.CTkButton(result_bar,text="Limpar simulação",width=125,height=34,fg_color="transparent",hover_color=COLORS["surface_hover"],text_color=COLORS["danger"],command=self.clear_simulation).pack(side="right")
         ctk.CTkButton(result_bar,text="Remover",image=self.icons["trash"],width=100,height=34,fg_color="transparent",hover_color=COLORS["surface_hover"],text_color=COLORS["danger"],command=self.remove_simulation_item).pack(side="right",padx=(0,6))
         ctk.CTkButton(result_bar,text="Editar",image=self.icons["edit"],width=92,height=34,fg_color="transparent",hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.edit_simulation_item).pack(side="right",padx=(0,6))
-        self.simulation_tree=self.table(self.simulation_result_card,("product","current","movement","projected"),("Produto","Estoque atual","Operação simulada","Estoque depois"),(360,130,150,140));self.simulation_tree.configure(height=8);self.simulation_tree.pack(fill="both",expand=True,padx=20,pady=(0,20));self.simulation_tree.bind("<Double-1>",lambda _event:self.edit_simulation_item())
+        simulation_table=ctk.CTkFrame(self.simulation_result_card,fg_color="transparent");simulation_table.pack(fill="both",expand=True,padx=20,pady=(0,20));simulation_table.grid_columnconfigure(0,weight=1);simulation_table.grid_rowconfigure(0,weight=1)
+        self.simulation_tree=self.table(simulation_table,("product","current","movement","projected"),("Produto","Estoque atual","Operação simulada","Depois da simulação"),(360,130,150,150));self.simulation_tree.configure(height=10);self.simulation_tree.grid(row=0,column=0,sticky="nsew");self.simulation_tree.bind("<Double-1>",lambda _event:self.edit_simulation_item())
+        self.simulation_scrollbar=ctk.CTkScrollbar(simulation_table,orientation="vertical",command=self.simulation_tree.yview,button_color=COLORS["accent"],button_hover_color=COLORS["accent_hover"]);self.simulation_scrollbar.grid(row=0,column=1,sticky="ns",padx=(8,0));self.simulation_tree.configure(yscrollcommand=self.simulation_scrollbar.set)
         self.simulation_current_cells=TreeStockOverlay(self.simulation_tree,COLORS,column="current")
         self.simulation_projected_cells=TreeStockOverlay(self.simulation_tree,COLORS,column="projected")
         self.configure_tables();self.refresh_simulation_product_results();self.refresh_simulation()
@@ -1379,11 +1405,14 @@ class EstoqueApp(ctk.CTk):
         selected=self.simulation_tree.selection()
         if not selected:messagebox.showinfo(APP_NAME,"Selecione um item da simulação para editar.",parent=self);return
         product_id=int(selected[0]);item=next((item for item in self.simulation_items if item["product_id"]==product_id),None)
-        if item:self.select_simulation_product(product_id);self.sim_quantity.set(fmt_number(item["quantity"]));self.sim_quantity_entry.focus_set()
+        if not item:messagebox.showinfo(APP_NAME,"Esse produto aparece apenas para comparação e não foi incluído na simulação.",parent=self);return
+        self.select_simulation_product(product_id);self.sim_quantity.set(fmt_number(item["quantity"]));self.sim_quantity_entry.focus_set()
     def remove_simulation_item(self):
         selected=self.simulation_tree.selection()
         if not selected:messagebox.showinfo(APP_NAME,"Selecione um item da simulação para remover.",parent=self);return
-        product_id=int(selected[0]);self.simulation_items=[item for item in self.simulation_items if item["product_id"]!=product_id];self.save_simulation_draft();self.refresh_simulation()
+        product_id=int(selected[0])
+        if not any(item["product_id"]==product_id for item in self.simulation_items):messagebox.showinfo(APP_NAME,"Esse produto aparece apenas para comparação e não foi incluído na simulação.",parent=self);return
+        self.simulation_items=[item for item in self.simulation_items if item["product_id"]!=product_id];self.save_simulation_draft();self.refresh_simulation()
     def clear_simulation(self):
         if not self.simulation_items:return
         if messagebox.askyesno(APP_NAME,"Limpar todos os produtos desta simulação?",parent=self):self.simulation_items.clear();self.save_simulation_draft();self.refresh_simulation()
@@ -1392,14 +1421,15 @@ class EstoqueApp(ctk.CTk):
         self.simulation_store.values={"operation":self.simulation_operation_key(),"items":[dict(item) for item in self.simulation_items]};self.simulation_store.save()
     def refresh_simulation(self):
         if not hasattr(self,"simulation_tree"):return
-        self.simulation_tree.delete(*self.simulation_tree.get_children());current_cells={};projected_cells={};valid_items=[];negative=[];total=0.0;operation=self.simulation_operation_key();sign="+" if operation=="entrada" else "−"
-        for item in self.simulation_items:
-            product=self.db.product(int(item["product_id"]))
-            if not product:continue
-            quantity=float(item["quantity"]);current=float(product["stock"]);projected=simulated_stock(current,quantity,operation);product_id=int(product["id"]);valid_items.append(item);total+=quantity
-            self.simulation_tree.insert("","end",iid=str(product_id),values=(product_label(product),"",f"{sign}{fmt_number(quantity)} {product['unit']}",""));current_cells[product_id]=(current,f"{fmt_number(current)} {product['unit']}");projected_cells[product_id]=(projected,f"{fmt_number(projected)} {product['unit']}")
-            if projected<0:negative.append((product,projected))
+        self.simulation_tree.delete(*self.simulation_tree.get_children());current_cells={};projected_cells={};negative=[];operation=self.simulation_operation_key();sign="+" if operation=="entrada" else "−";products=self.db.products();product_ids={int(product["id"]) for product in products}
+        valid_items=[item for item in self.simulation_items if int(item["product_id"]) in product_ids]
         if len(valid_items)!=len(self.simulation_items):self.simulation_items=valid_items;self.save_simulation_draft()
+        total=sum(float(item["quantity"]) for item in valid_items)
+        for row in simulation_stock_comparison(products,valid_items,operation):
+            product=row["product"];product_id=row["product_id"];current=row["current"];quantity=row["quantity"];projected=row["projected"]
+            movement="—" if quantity is None else f"{sign}{fmt_number(quantity)} {product['unit']}"
+            self.simulation_tree.insert("","end",iid=str(product_id),values=(product_label(product),"",movement,""));current_cells[product_id]=(current,f"{fmt_number(current)} {product['unit']}");projected_cells[product_id]=(projected,f"{fmt_number(projected)} {product['unit']}")
+            if quantity is not None and projected<0:negative.append((product,projected))
         self.simulation_current_cells.set_quantities(current_cells);self.simulation_projected_cells.set_quantities(projected_cells)
         for label,text in zip(self.simulation_cards,(str(len(valid_items)),fmt_number(total),str(len(negative)))):label.configure(text=text,text_color=("#5A0B1A","#FFB3BE") if label is self.simulation_cards[2] and negative else COLORS["text"])
         if negative:
@@ -1414,7 +1444,8 @@ class EstoqueApp(ctk.CTk):
         for title in ("A conferir","Conferidos hoje","Diferenças hoje","Confiança média"):
             card=Card(cards,height=92);card.pack(side="left",fill="both",expand=True,padx=(0,12));card.pack_propagate(False);ctk.CTkLabel(card,text=title,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(anchor="w",padx=16,pady=(13,2));label=ctk.CTkLabel(card,text="0",text_color=COLORS["text"],font=ctk.CTkFont("Inter",20,"bold"));label.pack(anchor="w",padx=16);self.count_cards.append(label)
         body=ctk.CTkFrame(page,fg_color="transparent");body.pack(fill="both",expand=True);body.grid_columnconfigure(1,weight=1);body.grid_rowconfigure(0,weight=1)
-        form=Card(body,width=330);form.grid(row=0,column=0,sticky="ns",padx=(0,16));form.grid_propagate(False);ctk.CTkLabel(form,text="Novo check-in",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(anchor="w",padx=20,pady=(16,10));self.c_product=tk.StringVar();self.c_quantity=tk.StringVar();self.c_responsible=tk.StringVar(value=self.settings.get("counter_name",""));self.c_note=tk.StringVar()
+        registered_users=self.user_names();saved_counter=self.settings.get("counter_name","");counter_values=registered_users or ["Cadastre um usuário na aba Cadastro"];selected_counter=saved_counter if saved_counter in registered_users else counter_values[0]
+        form=Card(body,width=330);form.grid(row=0,column=0,sticky="ns",padx=(0,16));form.grid_propagate(False);ctk.CTkLabel(form,text="Novo check-in",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(anchor="w",padx=20,pady=(16,10));self.c_product=tk.StringVar();self.c_quantity=tk.StringVar();self.c_responsible=tk.StringVar(value=selected_counter);self.c_note=tk.StringVar()
         def count_label(text):ctk.CTkLabel(form,text=text,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=20,pady=(0,4))
         count_label("Produto")
         self.c_product_combo=ctk.CTkOptionMenu(form,variable=self.c_product,values=[""],height=36,corner_radius=9,fg_color=COLORS["surface"],button_color=COLORS["surface_alt"],button_hover_color=COLORS["surface_hover"],text_color=COLORS["text"],dropdown_fg_color=COLORS["surface"],dropdown_hover_color=COLORS["accent_soft"],command=lambda _v:self.update_count_current());self.c_product_combo.pack(fill="x",padx=20,pady=(0,8))
@@ -1424,7 +1455,7 @@ class EstoqueApp(ctk.CTk):
         count_label("Data (DD/MM/AA)")
         self.c_date_entry=MaskedDateEntry(form,COLORS,initial=date.today(),control_height=36);self.c_date_entry.pack(fill="x",padx=20,pady=(0,8))
         count_label("Responsável pela contagem")
-        ctk.CTkEntry(form,textvariable=self.c_responsible,height=36,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface"],placeholder_text="Nome ou código").pack(fill="x",padx=20,pady=(0,8))
+        self.c_responsible_menu=ctk.CTkOptionMenu(form,variable=self.c_responsible,values=counter_values,height=36,corner_radius=9,fg_color=COLORS["surface"],button_color=COLORS["surface_alt"],button_hover_color=COLORS["surface_hover"],text_color=COLORS["text"],dropdown_fg_color=COLORS["surface"],dropdown_hover_color=COLORS["accent_soft"]);self.c_responsible_menu.pack(fill="x",padx=20,pady=(0,8))
         count_label("Observação opcional")
         ctk.CTkEntry(form,textvariable=self.c_note,height=36,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface"]).pack(fill="x",padx=20,pady=(0,10))
         ctk.CTkButton(form,text="Confirmar contagem",height=40,corner_radius=10,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.register_count).pack(fill="x",padx=20,pady=(0,14))
@@ -1459,7 +1490,7 @@ class EstoqueApp(ctk.CTk):
     def register_count(self):
         pid=self.product_map().get(self.c_product.get());responsible=self.c_responsible.get().strip()
         if not pid:messagebox.showwarning(APP_NAME,"Selecione um produto.",parent=self);return
-        if not responsible:messagebox.showwarning(APP_NAME,"Informe quem realizou a contagem.",parent=self);return
+        if responsible not in self.user_names():messagebox.showwarning(APP_NAME,"Selecione um usuário cadastrado como responsável pela contagem.",parent=self);return
         try:amount=float(self.c_quantity.get().replace(",","."));count_date=self.c_date_entry.get_date()
         except ValueError as error:messagebox.showwarning(APP_NAME,str(error)or"Revise a quantidade e a data.",parent=self);return
         if amount<0:messagebox.showwarning(APP_NAME,"A quantidade contada não pode ser negativa.",parent=self);return
@@ -1615,9 +1646,13 @@ class EstoqueApp(ctk.CTk):
     def operation_map(self, include_inactive=False):return {str(operation["name"]):int(operation["id"]) for operation in self.db.operations(include_inactive=include_inactive)}
     def user_names(self, include_inactive=False):return [str(user["name"]) for user in self.db.users(include_inactive=include_inactive)]
     def refresh_user_controls(self):
-        if not hasattr(self,"m_user_menu"):return
-        names=self.user_names();values=names or ["Cadastre um usuário na aba Cadastro"];self.m_user_menu.configure(values=values)
-        if self.m_user.get() not in names:self.m_user.set(names[0] if names else values[0])
+        names=self.user_names();values=names or ["Cadastre um usuário na aba Cadastro"]
+        if hasattr(self,"m_user_menu"):
+            self.m_user_menu.configure(values=values)
+            if self.m_user.get() not in names:self.m_user.set(names[0] if names else values[0])
+        if hasattr(self,"c_responsible_menu"):
+            self.c_responsible_menu.configure(values=values)
+            if self.c_responsible.get() not in names:self.c_responsible.set(names[0] if names else values[0])
     def refresh_operation_controls(self):
         active = self.operation_map()
         if hasattr(self, "m_operation_menu"):

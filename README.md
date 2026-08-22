@@ -24,13 +24,13 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Aba **Estoque atual** com saldo, situação e confiança; a última contagem fica somente na aba **Contagem**
 - Estoque atual agrupado com separadores visuais, produtos em ordem alfabética e saldos coloridos por quantidade
 - Estoque negativo permitido, com aviso persistente por produto e saldo destacado em vinho escuro
-- Aba **Contagem** no formato de check-in da planilha, com quantidade física, data e responsável
+- Aba **Contagem** no formato de check-in da planilha, com quantidade física, data e responsável selecionado entre os usuários ativos cadastrados
 - Última contagem em tempo relativo e colorido: hoje, dias, semanas, meses ou anos atrás
 - Aba **Cadastro** com gerenciadores separados e ilustrados para Usuários, Operações, Grupos e Produtos
 - Operações padrão e personalizadas visíveis no mesmo gerenciador, com edição e remoção segura
 - Movimentações em lote no estilo carrinho: vários produtos, uma operação, data, observação e usuário responsável
 - Revisão, edição e remoção dos itens antes de salvar o conjunto
-- Aba **Simulação** para planejar entradas ou saídas de vários produtos, comparando estoque atual e saldo projetado sem registrar movimentações
+- Aba **Simulação** para planejar entradas ou saídas de vários produtos e comparar simultaneamente a posição completa do estoque atual com o saldo projetado, sem registrar movimentações
 - Rascunho da simulação salvo somente no computador do usuário, fora da sincronização do Supabase
 - Pesquisa rápida na movimentação por parte do nome, grupo, variação ou categoria, ignorando diferenças de acento e maiúsculas
 - Índice de confiança calculado pelos dias, frequência e volume movimentado desde a última contagem

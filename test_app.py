@@ -138,6 +138,25 @@ class InventoryDatabaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "inválida"):
             app.simulated_stock(10, 2, "ajuste")
 
+    def test_simulation_comparison_includes_complete_current_and_projected_stock(self):
+        products = [
+            {"id": 1, "name": "MARINHO", "stock": 10, "unit": "un"},
+            {"id": 2, "name": "CARAMELO", "stock": 7, "unit": "un"},
+        ]
+
+        comparison = app.simulation_stock_comparison(
+            products,
+            [{"product_id": 1, "quantity": 4}],
+            "saida",
+        )
+
+        self.assertEqual(len(comparison), 2)
+        self.assertEqual(comparison[0]["current"], 10)
+        self.assertEqual(comparison[0]["projected"], 6)
+        self.assertEqual(comparison[1]["current"], 7)
+        self.assertEqual(comparison[1]["projected"], 7)
+        self.assertIsNone(comparison[1]["quantity"])
+
     def test_cloud_payload_contains_inventory_and_photo(self):
         photo = app.data_dir() / "fotos" / "produto.png"
         photo.write_bytes(b"imagem")
