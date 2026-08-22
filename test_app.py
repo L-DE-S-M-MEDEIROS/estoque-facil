@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import app
-from cloud_sync import CloudSync
+from cloud_sync import CloudSync, TABLES
 from premium_icons import app_icon, application_icon_path
 from PIL import Image
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
@@ -175,6 +175,31 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertIn("produto.png", payload["photos"])
         self.assertNotIn("simulation", payload)
 
+    def test_sku_mapping_remembers_multiple_products_and_normalizes_lookup(self):
+        first_id = self.create_product(name="BOLSA", variant="Caramelo")
+        self.db.save_product({"name":"MOCHILA","category":"Bolsa maternidade","group_name":"2 PEÇAS","variant":"Caramelo","unit":"un","minimum":0,"photo":"","notes":""})
+        second_id = int(self.db.db.execute("SELECT MAX(id) id FROM products").fetchone()["id"])
+
+        mapping_id = self.db.save_sku_mapping("  Caramelo   Leão 2P ", [first_id, second_id])
+
+        self.assertEqual(self.db.sku_mapping_for("caramelo leao 2p")["id"], mapping_id)
+        self.assertEqual({row["id"] for row in self.db.sku_mapping_products(mapping_id)}, {first_id, second_id})
+        self.assertIn("sku_mappings", CloudSync(app.data_dir(), {}).export_payload(self.db.db)["tables"])
+
+    def test_mapped_sales_list_consolidates_products_shared_by_skus(self):
+        first_id = self.create_product(name="BOLSA", variant="Caramelo")
+        self.db.save_product({"name":"MOCHILA","category":"Bolsa maternidade","group_name":"2 PEÇAS","variant":"Caramelo","unit":"un","minimum":0,"photo":"","notes":""})
+        second_id = int(self.db.db.execute("SELECT MAX(id) id FROM products").fetchone()["id"])
+        self.db.save_sku_mapping("KIT A", [first_id, second_id])
+        self.db.save_sku_mapping("KIT B", [first_id])
+
+        from sales_list_import import SalesListItem
+        review, draft = app.mapped_sales_list(self.db, [SalesListItem("KIT A", 2), SalesListItem("KIT B", 3)])
+
+        self.assertEqual(len(review), 2)
+        totals = {row["product_id"]: row["quantity"] for row in draft}
+        self.assertEqual(totals, {first_id: 5, second_id: 2})
+
 
 class LocalStateTests(unittest.TestCase):
     def setUp(self):
@@ -270,7 +295,7 @@ class SharedCloudSyncTests(unittest.TestCase):
 
     @staticmethod
     def payload(product_name=""):
-        tables = {name: [] for name in ("operation_types", "users", "product_groups", "products", "movement_batches", "movements")}
+        tables = {name: [] for name in TABLES}
         if product_name:
             tables["products"] = [{"id": 1, "name": product_name}]
         return {"format": 1, "app": "Estoque Bolsas Baby", "exported_at": "agora", "tables": tables, "photos": {}}

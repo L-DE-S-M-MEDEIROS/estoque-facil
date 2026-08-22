@@ -21,10 +21,11 @@ from premium_icons import app_icon, application_icon_path, brand_mark, icon
 from premium_widgets import MaskedDateEntry, TreeConfidenceOverlay, TreeRelativeDateOverlay, TreeRowSeparatorOverlay, TreeStockOverlay, confidence_tier
 from cloud_sync import CloudSync, CloudSyncError
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
+from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.1.11"
+APP_VERSION = "1.1.12"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -235,6 +236,33 @@ def simulation_stock_comparison(products, items, operation: str) -> list[dict]:
     return comparison
 
 
+def mapped_sales_list(database, items) -> tuple[list[dict], list[dict]]:
+    """Resolve imported SKUs and consolidate the resulting stock draft."""
+
+    review_rows = []
+    totals: dict[int, dict] = {}
+    for item in items:
+        mapping = database.sku_mapping_for(item.sku)
+        products = database.sku_mapping_products(int(mapping["id"])) if mapping else []
+        if not products:
+            raise ValueError(f"O SKU “{item.sku}” ainda não possui produtos vinculados.")
+        product_names = []
+        for product in products:
+            product_id = int(product["id"])
+            amount = float(item.quantity) * float(product["quantity_per_sale"])
+            product_names.append(product_label(product))
+            if product_id not in totals:
+                totals[product_id] = {"product_id": product_id, "quantity": 0.0, "product": product}
+            totals[product_id]["quantity"] += amount
+        review_rows.append({
+            "sku": item.sku,
+            "quantity": float(item.quantity),
+            "mapping_id": int(mapping["id"]),
+            "products": product_names,
+        })
+    return review_rows, list(totals.values())
+
+
 class Database:
     def __init__(self) -> None:
         self.path = data_dir() / "estoque.db"
@@ -281,8 +309,22 @@ class Database:
                 checked_by TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
                 operation_id INTEGER, batch_id INTEGER,
                 FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE RESTRICT);
+            CREATE TABLE IF NOT EXISTS sku_mappings(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sku TEXT NOT NULL,
+                normalized_sku TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS sku_mapping_products(
+                mapping_id INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                quantity_per_sale REAL NOT NULL DEFAULT 1 CHECK(quantity_per_sale>0),
+                PRIMARY KEY(mapping_id,product_id),
+                FOREIGN KEY(mapping_id) REFERENCES sku_mappings(id) ON DELETE CASCADE,
+                FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
             CREATE INDEX IF NOT EXISTS idx_movements_product ON movements(product_id);
             CREATE INDEX IF NOT EXISTS idx_movements_date ON movements(movement_date DESC);
+            CREATE INDEX IF NOT EXISTS idx_sku_mapping_products_product ON sku_mapping_products(product_id);
         """)
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(products)")}
         if "group_name" not in columns:
@@ -492,6 +534,83 @@ class Database:
         if self.db.execute("SELECT 1 FROM movements WHERE product_id=? LIMIT 1", (product_id,)).fetchone():
             return False
         self.db.execute("DELETE FROM products WHERE id=?", (product_id,)); self.db.commit(); return True
+
+    def sku_mappings(self, search: str = "") -> list[sqlite3.Row]:
+        term = f"%{search.strip()}%"
+        return self.db.execute("""SELECT sm.*,COUNT(smp.product_id) product_count
+            FROM sku_mappings sm
+            LEFT JOIN sku_mapping_products smp ON smp.mapping_id=sm.id
+            WHERE sm.sku LIKE ? OR EXISTS(
+                SELECT 1 FROM sku_mapping_products lookup
+                JOIN products p ON p.id=lookup.product_id
+                WHERE lookup.mapping_id=sm.id AND (
+                    p.name LIKE ? OR p.group_name LIKE ? OR p.variant LIKE ? OR p.category LIKE ?
+                )
+            )
+            GROUP BY sm.id ORDER BY sm.sku COLLATE NOCASE""", (term, term, term, term, term)).fetchall()
+
+    def sku_mapping(self, mapping_id: int) -> sqlite3.Row | None:
+        return self.db.execute("SELECT * FROM sku_mappings WHERE id=?", (mapping_id,)).fetchone()
+
+    def sku_mapping_for(self, sku: str) -> sqlite3.Row | None:
+        return self.db.execute("SELECT * FROM sku_mappings WHERE normalized_sku=?", (normalize_sku_key(sku),)).fetchone()
+
+    def sku_mapping_products(self, mapping_id: int) -> list[sqlite3.Row]:
+        return self.db.execute("""SELECT p.*,smp.quantity_per_sale,COALESCE(SUM(m.quantity),0) stock
+            FROM sku_mapping_products smp
+            JOIN products p ON p.id=smp.product_id
+            LEFT JOIN movements m ON m.product_id=p.id
+            WHERE smp.mapping_id=?
+            GROUP BY p.id,smp.quantity_per_sale
+            ORDER BY p.group_name COLLATE NOCASE,p.name COLLATE NOCASE,p.variant COLLATE NOCASE""", (mapping_id,)).fetchall()
+
+    def save_sku_mapping(self, sku: str, product_ids: list[int], mapping_id: int | None = None) -> int:
+        clean_sku = " ".join(sku.strip().split())
+        normalized = normalize_sku_key(clean_sku)
+        if not normalized:
+            raise ValueError("Informe o SKU.")
+        if len(clean_sku) > 180:
+            raise ValueError("O SKU pode ter no máximo 180 caracteres.")
+        unique_products = list(dict.fromkeys(int(product_id) for product_id in product_ids))
+        if not unique_products:
+            raise ValueError("Selecione pelo menos um produto que será descontado.")
+        existing_products = {
+            int(row["id"]) for row in self.db.execute(
+                f"SELECT id FROM products WHERE id IN ({','.join('?' for _ in unique_products)})",
+                unique_products,
+            )
+        }
+        if existing_products != set(unique_products):
+            raise ValueError("Um dos produtos selecionados não existe mais.")
+        now = datetime.now().isoformat(timespec="seconds")
+        try:
+            with self.db:
+                if mapping_id:
+                    if not self.sku_mapping(mapping_id):
+                        raise ValueError("Esse vínculo de SKU não existe mais.")
+                    self.db.execute("UPDATE sku_mappings SET sku=?,normalized_sku=?,updated_at=? WHERE id=?", (clean_sku, normalized, now, mapping_id))
+                else:
+                    existing = self.sku_mapping_for(clean_sku)
+                    if existing:
+                        mapping_id = int(existing["id"])
+                        self.db.execute("UPDATE sku_mappings SET sku=?,updated_at=? WHERE id=?", (clean_sku, now, mapping_id))
+                    else:
+                        cursor = self.db.execute("INSERT INTO sku_mappings(sku,normalized_sku,created_at,updated_at) VALUES(?,?,?,?)", (clean_sku, normalized, now, now))
+                        mapping_id = int(cursor.lastrowid)
+                self.db.execute("DELETE FROM sku_mapping_products WHERE mapping_id=?", (mapping_id,))
+                self.db.executemany(
+                    "INSERT INTO sku_mapping_products(mapping_id,product_id,quantity_per_sale) VALUES(?,?,1)",
+                    ((mapping_id, product_id) for product_id in unique_products),
+                )
+        except sqlite3.IntegrityError as error:
+            raise ValueError("Já existe um vínculo cadastrado para esse SKU.") from error
+        return int(mapping_id)
+
+    def delete_sku_mapping(self, mapping_id: int) -> None:
+        if not self.sku_mapping(mapping_id):
+            raise ValueError("Esse vínculo de SKU não existe mais.")
+        with self.db:
+            self.db.execute("DELETE FROM sku_mappings WHERE id=?", (mapping_id,))
 
     def stock(self, product_id: int) -> float:
         return float(self.db.execute("SELECT COALESCE(SUM(quantity),0) value FROM movements WHERE product_id=?", (product_id,)).fetchone()["value"])
@@ -867,6 +986,139 @@ class ProductManagerDialog(BrandedToplevel):
         self.refresh();self.parent.refresh_all()
 
 
+class SkuMappingEditorDialog(BrandedToplevel):
+    def __init__(self, parent: "EstoqueApp", sku: str = "", mapping_id: int | None = None, locked_sku: bool = False, context: str = ""):
+        super().__init__(parent, fg_color=COLORS["background"])
+        self.parent = parent; self.mapping_id = mapping_id; self.result: int | None = None
+        self.title("Vincular SKU a produtos")
+        scale = parent.ui_scale; width, height = round(820*scale), round(620*scale)
+        self.geometry(f"{width}x{height}+{parent.winfo_x()+70}+{parent.winfo_y()+45}")
+        self.minsize(round(680*scale), round(500*scale)); self.transient(parent); self.grab_set()
+        self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(1, weight=1)
+
+        mapping = parent.db.sku_mapping(mapping_id) if mapping_id else None
+        current_products = parent.db.sku_mapping_products(mapping_id) if mapping_id else []
+        selected = {int(product["id"]) for product in current_products}
+        self.product_variables = {int(product["id"]): tk.BooleanVar(value=int(product["id"]) in selected) for product in parent.db.products()}
+
+        header = ctk.CTkFrame(self, fg_color=COLORS["surface"], corner_radius=0); header.grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(header, text="MEMÓRIA DE SKU", text_color=COLORS["accent"], font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=28,pady=(18,2))
+        ctk.CTkLabel(header, text="Escolha os produtos descontados", text_color=COLORS["text"], font=ctk.CTkFont("Inter",22,"bold")).pack(anchor="w",padx=28)
+        subtitle = context or "Cada unidade vendida deste SKU descontará uma unidade de cada produto marcado."
+        ctk.CTkLabel(header, text=subtitle, text_color=COLORS["muted"], font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=28,pady=(5,18))
+
+        content = ctk.CTkFrame(self, fg_color="transparent"); content.grid(row=1,column=0,sticky="nsew",padx=24,pady=20); content.grid_columnconfigure(0,weight=1); content.grid_rowconfigure(2,weight=1)
+        sku_row = ctk.CTkFrame(content,fg_color="transparent"); sku_row.grid(row=0,column=0,sticky="ew",pady=(0,12)); sku_row.grid_columnconfigure(0,weight=1)
+        self.sku = tk.StringVar(value=str(mapping["sku"] if mapping else sku))
+        self.sku_entry = ctk.CTkEntry(sku_row,textvariable=self.sku,height=42,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface"])
+        self.sku_entry.grid(row=0,column=0,sticky="ew")
+        if locked_sku:self.sku_entry.configure(state="disabled")
+        self.search = ctk.CTkEntry(content,placeholder_text="Buscar produto, grupo, variação ou categoria...",height=40,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface"])
+        self.search.grid(row=1,column=0,sticky="ew",pady=(0,10)); self.search.bind("<KeyRelease>",lambda _event:self.refresh_products())
+        self.product_list = ctk.CTkScrollableFrame(content,fg_color=COLORS["surface"],corner_radius=10,border_width=1,border_color=COLORS["border"],scrollbar_button_color=COLORS["accent"],scrollbar_button_hover_color=COLORS["accent_hover"])
+        self.product_list.grid(row=2,column=0,sticky="nsew")
+        actions=ctk.CTkFrame(content,fg_color="transparent");actions.grid(row=3,column=0,sticky="ew",pady=(14,0))
+        ctk.CTkButton(actions,text="Cancelar",width=105,height=40,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.destroy).pack(side="left")
+        ctk.CTkButton(actions,text="Salvar vínculo",width=160,height=40,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.save).pack(side="right")
+        self.refresh_products()
+
+    def refresh_products(self):
+        for widget in self.product_list.winfo_children():widget.destroy()
+        query=self.search.get().strip();visible=0
+        for product in self.parent.db.products():
+            if query and not product_matches_search(product,query):continue
+            visible+=1;row=ctk.CTkFrame(self.product_list,fg_color="transparent");row.pack(fill="x",padx=8,pady=4)
+            checkbox=ctk.CTkCheckBox(row,text=product_label(product),variable=self.product_variables[int(product["id"])],onvalue=True,offvalue=False,text_color=COLORS["text"],fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],font=ctk.CTkFont("Inter",11,"bold"))
+            checkbox.pack(side="left",fill="x",expand=True,anchor="w")
+            ctk.CTkLabel(row,text=f"Saldo: {fmt_number(product['stock'])} {product['unit']}",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(side="right",padx=10)
+        if not visible:ctk.CTkLabel(self.product_list,text="Nenhum produto encontrado.",text_color=COLORS["muted"]).pack(pady=24)
+
+    def save(self):
+        selected=[product_id for product_id,variable in self.product_variables.items() if variable.get()]
+        try:self.result=self.parent.db.save_sku_mapping(self.sku.get(),selected,self.mapping_id)
+        except ValueError as error:messagebox.showwarning(APP_NAME,str(error),parent=self);return
+        self.destroy()
+
+
+class SkuManagerDialog(BrandedToplevel):
+    def __init__(self,parent:"EstoqueApp"):
+        super().__init__(parent,fg_color=COLORS["background"]);self.parent=parent;self.title("Gerenciar vínculos de SKU")
+        scale=parent.ui_scale;width,height=round(940*scale),round(590*scale);self.geometry(f"{width}x{height}+{parent.winfo_x()+55}+{parent.winfo_y()+55}");self.minsize(round(760*scale),round(480*scale));self.transient(parent);self.grab_set();self.grid_columnconfigure(0,weight=1);self.grid_rowconfigure(1,weight=1)
+        header=ctk.CTkFrame(self,fg_color=COLORS["surface"],corner_radius=0);header.grid(row=0,column=0,sticky="ew")
+        ctk.CTkLabel(header,text="SKUS DE VENDA",text_color=COLORS["accent"],font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=28,pady=(18,2));ctk.CTkLabel(header,text="Memória de produtos por SKU",text_color=COLORS["text"],font=ctk.CTkFont("Inter",22,"bold")).pack(anchor="w",padx=28)
+        ctk.CTkLabel(header,text="Consulte e altere quais produtos serão descontados nas próximas listas importadas.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=28,pady=(5,18))
+        content=ctk.CTkFrame(self,fg_color="transparent");content.grid(row=1,column=0,sticky="nsew",padx=24,pady=20);content.grid_columnconfigure(0,weight=1);content.grid_rowconfigure(1,weight=1)
+        toolbar=ctk.CTkFrame(content,fg_color="transparent");toolbar.grid(row=0,column=0,sticky="ew",pady=(0,12))
+        self.search=ctk.CTkEntry(toolbar,placeholder_text="Buscar SKU ou produto vinculado...",width=360,height=40,corner_radius=9);self.search.pack(side="left");self.search.bind("<KeyRelease>",lambda _event:self.refresh())
+        ctk.CTkButton(toolbar,text="Novo SKU",image=parent.icons["plus"],height=40,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.new_mapping).pack(side="right")
+        ctk.CTkButton(toolbar,text="Excluir",image=parent.icons["trash"],height=40,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["danger"],command=self.delete_mapping).pack(side="right",padx=8)
+        ctk.CTkButton(toolbar,text="Editar vínculo",image=parent.icons["edit"],height=40,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.edit_mapping).pack(side="right")
+        card=Card(content);card.grid(row=1,column=0,sticky="nsew");self.tree=parent.table(card,("sku","products"),("SKU","Produtos descontados"),(260,570));self.tree.column("products",anchor="w");self.tree.pack(fill="both",expand=True,padx=18,pady=18);self.tree.bind("<Double-1>",lambda _event:self.edit_mapping());self.refresh()
+
+    def refresh(self):
+        self.tree.delete(*self.tree.get_children())
+        for mapping in self.parent.db.sku_mappings(self.search.get()):
+            products=self.parent.db.sku_mapping_products(int(mapping["id"]));labels="; ".join(product_label(product) for product in products) or "Sem produtos"
+            self.tree.insert("","end",iid=str(mapping["id"]),values=(mapping["sku"],labels))
+
+    def selected_mapping(self):
+        selected=self.tree.selection();return int(selected[0]) if selected else None
+
+    def open_editor(self,mapping_id=None):
+        self.grab_release();dialog=SkuMappingEditorDialog(self.parent,mapping_id=mapping_id);self.wait_window(dialog);self.grab_set()
+        if dialog.result:self.refresh()
+
+    def new_mapping(self):self.open_editor()
+
+    def edit_mapping(self):
+        mapping_id=self.selected_mapping()
+        if not mapping_id:messagebox.showinfo(APP_NAME,"Selecione um SKU para editar.",parent=self);return
+        self.open_editor(mapping_id)
+
+    def delete_mapping(self):
+        mapping_id=self.selected_mapping()
+        if not mapping_id:messagebox.showinfo(APP_NAME,"Selecione um SKU para excluir.",parent=self);return
+        mapping=self.parent.db.sku_mapping(mapping_id)
+        if not mapping:self.refresh();return
+        if not messagebox.askyesno(APP_NAME,f"Excluir o vínculo do SKU “{mapping['sku']}”?\n\nAs movimentações antigas não serão alteradas.",icon="warning",parent=self):return
+        try:self.parent.db.delete_sku_mapping(mapping_id)
+        except ValueError as error:messagebox.showwarning(APP_NAME,str(error),parent=self);return
+        self.refresh()
+
+
+class SalesListReviewDialog(BrandedToplevel):
+    def __init__(self,parent:"EstoqueApp",source_label:str,file_name:str,items):
+        super().__init__(parent,fg_color=COLORS["background"]);self.parent=parent;self.items=items;self.result=False;self.title(f"Conferir lista {source_label}")
+        scale=parent.ui_scale;width,height=round(1020*scale),round(700*scale);self.geometry(f"{width}x{height}+{parent.winfo_x()+35}+{parent.winfo_y()+25}");self.minsize(round(820*scale),round(570*scale));self.transient(parent);self.grab_set();self.grid_columnconfigure(0,weight=1);self.grid_rowconfigure(1,weight=1)
+        header=ctk.CTkFrame(self,fg_color=COLORS["surface"],corner_radius=0);header.grid(row=0,column=0,sticky="ew")
+        ctk.CTkLabel(header,text=f"LISTA {source_label.upper()}",text_color=COLORS["accent"],font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=28,pady=(18,2));ctk.CTkLabel(header,text="Confira antes de levar para Movimentações",text_color=COLORS["text"],font=ctk.CTkFont("Inter",22,"bold")).pack(anchor="w",padx=28)
+        ctk.CTkLabel(header,text=file_name,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=28,pady=(5,18))
+        content=ctk.CTkFrame(self,fg_color="transparent");content.grid(row=1,column=0,sticky="nsew",padx=24,pady=18);content.grid_columnconfigure(0,weight=1);content.grid_rowconfigure((1,3),weight=1)
+        sku_bar=ctk.CTkFrame(content,fg_color="transparent");sku_bar.grid(row=0,column=0,sticky="ew",pady=(0,8));ctk.CTkLabel(sku_bar,text="Leitura por SKU",text_color=COLORS["text"],font=ctk.CTkFont("Inter",14,"bold")).pack(side="left")
+        ctk.CTkButton(sku_bar,text="Alterar vínculo selecionado",image=parent.icons["edit"],height=34,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.edit_mapping).pack(side="right")
+        self.sku_tree=parent.table(content,("sku","quantity","products"),("SKU","Qnt. da lista","Produtos descontados"),(270,110,560));self.sku_tree.column("products",anchor="w");self.sku_tree.grid(row=1,column=0,sticky="nsew")
+        ctk.CTkLabel(content,text="Baixa consolidada por produto",text_color=COLORS["text"],font=ctk.CTkFont("Inter",14,"bold")).grid(row=2,column=0,sticky="w",pady=(14,8))
+        self.product_tree=parent.table(content,("product","quantity","current","after"),("Produto","Quantidade a descontar","Saldo atual","Saldo depois"),(500,160,130,130));self.product_tree.column("product",anchor="w");self.product_tree.grid(row=3,column=0,sticky="nsew")
+        actions=ctk.CTkFrame(content,fg_color="transparent");actions.grid(row=4,column=0,sticky="ew",pady=(14,0));ctk.CTkButton(actions,text="Cancelar",width=105,height=40,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.destroy).pack(side="left")
+        ctk.CTkButton(actions,text="Adicionar à movimentação",width=220,height=40,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.confirm).pack(side="right")
+        self.refresh()
+
+    def refresh(self):
+        self.review_rows,self.product_rows=mapped_sales_list(self.parent.db,self.items);self.sku_tree.delete(*self.sku_tree.get_children());self.product_tree.delete(*self.product_tree.get_children())
+        for index,row in enumerate(self.review_rows):self.sku_tree.insert("","end",iid=str(index),values=(row["sku"],fmt_number(row["quantity"]),"; ".join(row["products"])))
+        for row in self.product_rows:
+            product=row["product"];current=float(product["stock"]);after=current-float(row["quantity"])
+            self.product_tree.insert("","end",iid=str(row["product_id"]),values=(product_label(product),f"{fmt_number(row['quantity'])} {product['unit']}",f"{fmt_number(current)} {product['unit']}",f"{fmt_number(after)} {product['unit']}"))
+
+    def edit_mapping(self):
+        selected=self.sku_tree.selection()
+        if not selected:messagebox.showinfo(APP_NAME,"Selecione um SKU para alterar o vínculo.",parent=self);return
+        row=self.review_rows[int(selected[0])];self.grab_release();dialog=SkuMappingEditorDialog(self.parent,mapping_id=row["mapping_id"]);self.wait_window(dialog);self.grab_set()
+        if dialog.result:self.refresh()
+
+    def confirm(self):self.result=True;self.destroy()
+
+
 class OperationManagerDialog(BrandedToplevel):
     EFFECT_LABELS = {
         "positive": "Soma ao estoque (+)",
@@ -1210,15 +1462,16 @@ class EstoqueApp(ctk.CTk):
         self.table_separators=active_separators
 
     def registration_page(self):
-        page=ctk.CTkFrame(self.content,fg_color="transparent")
+        page=ctk.CTkScrollableFrame(self.content,fg_color="transparent",corner_radius=0,scrollbar_button_color=COLORS["accent"],scrollbar_button_hover_color=COLORS["accent_hover"])
         PageTitle(page,"Cadastro","Escolha o tipo de cadastro que deseja abrir.").pack(fill="x",pady=(0,26))
-        ctk.CTkLabel(page,text="Cada opção possui seu próprio gerenciador, mantendo usuários, operações, grupos e produtos separados.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(0,18))
-        choices=ctk.CTkFrame(page,fg_color="transparent");choices.pack(fill="both",expand=True);choices.grid_columnconfigure((0,1),weight=1);choices.grid_rowconfigure((0,1),weight=1)
+        ctk.CTkLabel(page,text="Cada opção possui seu próprio gerenciador, incluindo a memória dos SKUs usados nas listas de vendas.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(0,18))
+        choices=ctk.CTkFrame(page,fg_color="transparent");choices.pack(fill="both",expand=True);choices.grid_columnconfigure((0,1),weight=1);choices.grid_rowconfigure((0,1,2),weight=1)
         definitions=(
             ("Usuários","Cadastre quem poderá ser identificado nas movimentações.","user",self.open_user_manager),
             ("Operações","Defina nomes personalizados que somam ou retiram estoque.","operation",self.open_operation_manager),
             ("Grupos","Organize modelos como 2 PEÇAS, 4 PEÇAS e outras famílias.","group",self.open_group_manager),
             ("Produtos","Cadastre, edite e organize os produtos e seus grupos.","products",self.open_product_manager),
+            ("SKUs de venda","Consulte e altere quais produtos cada SKU descontará nas próximas listas.","registration",self.open_sku_manager),
         )
         for index,(title,description,icon_name,command) in enumerate(definitions):
             row,column=divmod(index,2);card=Card(choices);card.grid(row=row,column=column,sticky="nsew",padx=(0 if column==0 else 8,8 if column==0 else 0),pady=(0 if row==0 else 8,8 if row==0 else 0))
@@ -1235,6 +1488,8 @@ class EstoqueApp(ctk.CTk):
         dialog=GroupManagerDialog(self);self.wait_window(dialog);self.refresh_all()
     def open_product_manager(self):
         dialog=ProductManagerDialog(self);self.wait_window(dialog);self.refresh_all()
+    def open_sku_manager(self):
+        dialog=SkuManagerDialog(self);self.wait_window(dialog)
 
     def products_page(self):
         page=ctk.CTkFrame(self.content,fg_color="transparent"); PageTitle(page,"Produtos","Cadastre e organize os itens do seu estoque.").pack(fill="x",pady=(0,22))
@@ -1528,6 +1783,14 @@ class EstoqueApp(ctk.CTk):
         self.m_user = tk.StringVar(value=self.settings.get("movement_user",""))
         self.product_suggestions_collapsed = not self.settings.get("movement_products_expanded",False)
 
+        sales_import = Card(page); sales_import.pack(fill="x",pady=(0,16))
+        sales_text=ctk.CTkFrame(sales_import,fg_color="transparent");sales_text.pack(fill="x",expand=True,padx=20,pady=(16,8))
+        ctk.CTkLabel(sales_text,text="Baixa automática com lista",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w")
+        ctk.CTkLabel(sales_text,text="Leia SKU e quantidade, confira os vínculos e leve a baixa para o conjunto abaixo.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(anchor="w",pady=(4,0))
+        sales_actions=ctk.CTkFrame(sales_import,fg_color="transparent");sales_actions.pack(fill="x",padx=20,pady=(0,16))
+        ctk.CTkButton(sales_actions,text="Importar Lista Shopee",image=self.icons["upload"],height=40,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=lambda:self.import_sales_list("shopee")).pack(side="left",padx=(0,8))
+        ctk.CTkButton(sales_actions,text="Importar Lista Mercado Livre",image=self.icons["upload"],height=40,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=lambda:self.import_sales_list("mercado_livre")).pack(side="left")
+
         composer = Card(page)
         composer.pack(fill="x", pady=(0, 16))
         composer.grid_columnconfigure(0, weight=2); composer.grid_columnconfigure(1, weight=3)
@@ -1599,6 +1862,37 @@ class EstoqueApp(ctk.CTk):
         self.configure_tables()
         if not self.product_suggestions_collapsed:self.show_product_suggestions()
         return page
+
+    def import_sales_list(self, source: str):
+        labels={"shopee":"Shopee","mercado_livre":"Mercado Livre"};source_label=labels[source]
+        if not self.db.products():messagebox.showwarning(APP_NAME,"Cadastre pelo menos um produto antes de importar uma lista.",parent=self);return
+        selected=filedialog.askopenfilename(parent=self,title=f"Selecionar Lista {source_label}",filetypes=[("Arquivo PDF","*.pdf")])
+        if not selected:return
+        try:items=read_sales_list(Path(selected),source)
+        except SalesListError as error:messagebox.showerror(APP_NAME,str(error),parent=self);return
+
+        for index,item in enumerate(items,1):
+            mapping=self.db.sku_mapping_for(item.sku);products=self.db.sku_mapping_products(int(mapping["id"])) if mapping else []
+            if products:continue
+            dialog=SkuMappingEditorDialog(self,sku=item.sku,locked_sku=True,context=f"Novo SKU encontrado ({index} de {len(items)}). Marque um ou mais produtos para memorizar este vínculo.")
+            self.wait_window(dialog)
+            if not dialog.result:
+                messagebox.showinfo(APP_NAME,"Importação cancelada. Os vínculos que você já salvou foram mantidos.",parent=self);return
+
+        try:review=SalesListReviewDialog(self,source_label,Path(selected).name,items);self.wait_window(review)
+        except ValueError as error:messagebox.showwarning(APP_NAME,str(error),parent=self);return
+        if not review.result:return
+        if self.movement_draft and not messagebox.askyesno(APP_NAME,"Substituir os produtos que já estão no conjunto pela baixa desta lista?",icon="warning",parent=self):return
+
+        self.refresh_operation_controls();outgoing=self.db.operation("saida")
+        if not outgoing or not outgoing["active"]:
+            outgoing=next((operation for operation in self.db.operations() if operation["effect"]=="negative"),None)
+        if not outgoing:messagebox.showwarning(APP_NAME,"Cadastre ou reative uma operação de saída antes de concluir a importação.",parent=self);return
+        self.m_operation.set(str(outgoing["name"]));self.on_operation_change()
+        self.movement_draft=[{"product_id":int(row["product_id"]),"quantity":float(row["quantity"])} for row in review.product_rows]
+        self.draft_edit_index=None;self.m_selected_product_id=None;self.m_product.set("");self.m_quantity.set("");self.m_add_button.configure(text="Adicionar")
+        self.m_reason.set(f"Lista {source_label} - {Path(selected).name}");self.refresh_draft();self.update_current_stock()
+        messagebox.showinfo(APP_NAME,"Lista conferida e adicionada à movimentação.\n\nEscolha a data e o usuário responsável, revise o conjunto e clique em Salvar movimentação para efetuar a baixa.",parent=self)
 
     def product_map(self):return {f"{product_label(p)}  [{p['unit']}]":int(p["id"]) for p in self.db.products()}
     def movement_product_display(self,product):return f"{product_label(product)}  [{product['unit']}]"
@@ -1783,7 +2077,7 @@ class EstoqueApp(ctk.CTk):
 
     def cloud_upload(self):
         if not self.cloud.signed_in:CloudLoginDialog(self);return
-        if not messagebox.askyesno(APP_NAME,"Enviar agora os produtos, movimentações, cadastros e fotos para o estoque compartilhado no Supabase?",parent=self):return
+        if not messagebox.askyesno(APP_NAME,"Enviar agora os produtos, movimentações, cadastros, vínculos de SKU e fotos para o estoque compartilhado no Supabase?",parent=self):return
         try:self.cloud.upload(self.db.db);self.save_cloud_settings()
         except CloudSyncError as error:messagebox.showerror(APP_NAME,str(error),parent=self);return
         messagebox.showinfo(APP_NAME,"Dados enviados e protegidos no Supabase.",parent=self)

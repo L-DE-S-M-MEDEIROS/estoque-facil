@@ -19,6 +19,8 @@ TABLES = (
     "users",
     "product_groups",
     "products",
+    "sku_mappings",
+    "sku_mapping_products",
     "movement_batches",
     "movements",
 )
@@ -136,7 +138,7 @@ class CloudSync:
     @staticmethod
     def payload_has_user_data(payload: dict) -> bool:
         tables = payload.get("tables") or {}
-        return any(tables.get(name) for name in ("products", "movements", "movement_batches", "users", "product_groups"))
+        return any(tables.get(name) for name in ("products", "movements", "movement_batches", "users", "product_groups", "sku_mappings"))
 
     def _remember_sync(self, payload: dict, snapshot: dict) -> None:
         self.settings["cloud_last_fingerprint"] = self.payload_fingerprint(payload)

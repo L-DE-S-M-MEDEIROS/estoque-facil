@@ -30,6 +30,12 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Operações padrão e personalizadas visíveis no mesmo gerenciador, com edição e remoção segura
 - Movimentações em lote no estilo carrinho: vários produtos, uma operação, data, observação e usuário responsável
 - Revisão, edição e remoção dos itens antes de salvar o conjunto
+- Importação de listas PDF da Shopee e do Mercado Livre usando apenas SKU e quantidade
+- Leitura posicional da Lista Shopee, inclusive quando o SKU ocupa mais de uma linha
+- Localização automática das páginas de lista no final de PDFs com etiquetas e notas fiscais do Mercado Livre
+- Memória sincronizada dos vínculos entre cada SKU e um ou mais produtos do estoque
+- Conferência por SKU e baixa consolidada por produto antes de levar a lista para Movimentações
+- Gerenciador de SKUs na aba Cadastro para criar, pesquisar, alterar ou excluir vínculos futuros
 - Aba **Simulação** para planejar entradas ou saídas de vários produtos e comparar simultaneamente a posição completa do estoque atual com o saldo projetado, sem registrar movimentações
 - Rascunho da simulação salvo somente no computador do usuário, fora da sincronização do Supabase
 - Pesquisa rápida na movimentação por parte do nome, grupo, variação ou categoria, ignorando diferenças de acento e maiúsculas
