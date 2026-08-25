@@ -71,6 +71,13 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertTrue(app.product_matches_search(product, "matern"))
         self.assertFalse(app.product_matches_search(product, "caramelo"))
 
+    def test_count_product_picker_preference_is_persistent(self):
+        path = Path(self.temporary_directory.name) / "ui-preferences.json"
+        preferences = LocalPreferences(path)
+        preferences.values["count_products_expanded"] = True
+        preferences.save()
+        self.assertTrue(LocalPreferences(path).values["count_products_expanded"])
+
     def test_default_operations_can_be_renamed_and_hidden(self):
         entry = self.db.operation("entrada")
         self.db.save_operation("Recebimento", "negative", int(entry["id"]))

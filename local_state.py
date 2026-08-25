@@ -15,6 +15,7 @@ UI_DEFAULTS: dict[str, Any] = {
     "stock_search": "",
     "count_search": "",
     "count_filter": "todos",
+    "count_products_expanded": False,
     "movement_products_expanded": False,
     "movement_operation": "Entrada",
     "movement_user": "",
@@ -66,6 +67,7 @@ def sanitize_preferences(values: dict[str, Any]) -> dict[str, Any]:
     clean["stock_search"] = _text(values.get("stock_search"))
     clean["count_search"] = _text(values.get("count_search"))
     clean["count_filter"] = values.get("count_filter") if values.get("count_filter") in ("todos", "pendentes", "verificados") else "todos"
+    clean["count_products_expanded"] = values.get("count_products_expanded") is True
     clean["movement_products_expanded"] = values.get("movement_products_expanded") is True
     clean["movement_operation"] = _text(values.get("movement_operation"), "Entrada", 100) or "Entrada"
     clean["movement_user"] = _text(values.get("movement_user"), maximum=100)

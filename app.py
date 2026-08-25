@@ -25,7 +25,7 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.1.13"
+APP_VERSION = "1.1.14"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -1572,6 +1572,7 @@ class EstoqueApp(ctk.CTk):
         if hasattr(self,"stock_search"):self.settings["stock_search"] = self.stock_search.get()
         if hasattr(self,"count_search"):self.settings["count_search"] = self.count_search.get()
         if hasattr(self,"count_filter"):self.settings["count_filter"] = self.count_filter.get()
+        if hasattr(self,"count_product_suggestions_collapsed"):self.settings["count_products_expanded"] = not self.count_product_suggestions_collapsed
         if hasattr(self,"m_operation"):self.settings["movement_operation"] = self.m_operation.get()
         if hasattr(self,"m_user"):self.settings["movement_user"] = self.m_user.get()
         if hasattr(self,"history_filter"):self.settings["history_filter"] = self.history_filter.get()
@@ -1897,10 +1898,14 @@ class EstoqueApp(ctk.CTk):
             card=Card(cards,height=92);card.pack(side="left",fill="both",expand=True,padx=(0,12));card.pack_propagate(False);ctk.CTkLabel(card,text=title,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(anchor="w",padx=16,pady=(13,2));label=ctk.CTkLabel(card,text="0",text_color=COLORS["text"],font=ctk.CTkFont("Inter",20,"bold"));label.pack(anchor="w",padx=16);self.count_cards.append(label)
         body=ctk.CTkFrame(page,fg_color="transparent");body.pack(fill="both",expand=True);body.grid_columnconfigure(1,weight=1);body.grid_rowconfigure(0,weight=1)
         registered_users=self.user_names();saved_counter=self.settings.get("counter_name","");counter_values=registered_users or ["Cadastre um usuário na aba Cadastro"];selected_counter=saved_counter if saved_counter in registered_users else counter_values[0]
-        form=Card(body,width=330);form.grid(row=0,column=0,sticky="ns",padx=(0,16));form.grid_propagate(False);ctk.CTkLabel(form,text="Novo check-in",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(anchor="w",padx=20,pady=(16,10));self.c_product=tk.StringVar();self.c_quantity=tk.StringVar();self.c_responsible=tk.StringVar(value=selected_counter);self.c_note=tk.StringVar()
+        form=Card(body,width=360);form.grid(row=0,column=0,sticky="ns",padx=(0,16));form.grid_propagate(False);ctk.CTkLabel(form,text="Novo check-in",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(anchor="w",padx=20,pady=(16,10));self.c_product=tk.StringVar();self.c_quantity=tk.StringVar();self.c_responsible=tk.StringVar(value=selected_counter);self.c_note=tk.StringVar();self.c_selected_product_id: int|None=None;self.count_product_suggestions_collapsed=not self.settings.get("count_products_expanded",False)
         def count_label(text):ctk.CTkLabel(form,text=text,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=20,pady=(0,4))
         count_label("Produto")
-        self.c_product_combo=ctk.CTkOptionMenu(form,variable=self.c_product,values=[""],height=36,corner_radius=9,fg_color=COLORS["surface"],button_color=COLORS["surface_alt"],button_hover_color=COLORS["surface_hover"],text_color=COLORS["text"],dropdown_fg_color=COLORS["surface"],dropdown_hover_color=COLORS["accent_soft"],command=lambda _v:self.update_count_current());self.c_product_combo.pack(fill="x",padx=20,pady=(0,8))
+        self.c_product_search=ctk.CTkFrame(form,height=42,corner_radius=9,fg_color=COLORS["surface"],border_width=2,border_color=COLORS["accent"]);self.c_product_search.pack(fill="x",padx=20,pady=(0,8));self.c_product_search.grid_columnconfigure(1,weight=1);self.c_product_search.grid_propagate(False)
+        ctk.CTkLabel(self.c_product_search,text="",image=self.icons["search"],width=36).grid(row=0,column=0,sticky="nsew",padx=(7,0),pady=4)
+        self.c_product_entry=ctk.CTkEntry(self.c_product_search,textvariable=self.c_product,placeholder_text="Buscar produto, grupo ou variação...",height=34,corner_radius=0,border_width=0,fg_color="transparent");self.c_product_entry.grid(row=0,column=1,sticky="nsew",padx=(0,2),pady=3);self.c_product_entry.bind("<FocusIn>",lambda _event:self.show_count_product_suggestions(force=True));self.c_product_entry.bind("<KeyRelease>",self.on_count_product_search);self.c_product_entry.bind("<Return>",lambda _event:self.select_first_count_product_suggestion())
+        self.count_product_suggestions_toggle=ctk.CTkButton(self.c_product_search,text="",image=self.icons["expand" if self.count_product_suggestions_collapsed else "collapse"],width=36,height=32,corner_radius=7,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],command=self.toggle_count_product_suggestions);self.count_product_suggestions_toggle.grid(row=0,column=2,sticky="e",padx=(2,5),pady=4)
+        self.count_product_suggestions=SmoothScrollableFrame(form,height=148,corner_radius=9,fg_color=COLORS["surface_alt"],border_width=1,border_color=COLORS["border"],scrollbar_button_color=COLORS["accent"],scrollbar_button_hover_color=COLORS["accent_hover"])
         self.count_current=ctk.CTkLabel(form,text="Saldo do sistema: —",height=32,corner_radius=9,fg_color=COLORS["accent_soft"],text_color=COLORS["accent"],font=ctk.CTkFont("Inter",10,"bold"));self.count_current.pack(fill="x",padx=20,pady=(0,8))
         count_label("Quantidade física contada")
         self.c_quantity_entry=ctk.CTkEntry(form,textvariable=self.c_quantity,height=36,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface"]);self.c_quantity_entry.pack(fill="x",padx=20,pady=(0,8))
@@ -1914,12 +1919,61 @@ class EstoqueApp(ctk.CTk):
         listing=Card(body);listing.grid(row=0,column=1,sticky="nsew");bar=ctk.CTkFrame(listing,fg_color="transparent");bar.pack(fill="x",padx=20,pady=16);ctk.CTkLabel(bar,text="Check-in dos produtos",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(side="left")
         self.count_filter=tk.StringVar(value=self.settings.get("count_filter","todos"));ctk.CTkOptionMenu(bar,variable=self.count_filter,values=["todos","pendentes","verificados"],width=110,height=36,fg_color=COLORS["surface_alt"],button_color=COLORS["surface_hover"],text_color=COLORS["text"],command=lambda _value:(self.refresh_counts(),self.save_interface_state())).pack(side="right")
         ctk.CTkButton(bar,text="Contar",image=self.icons["count"],width=95,height=36,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.prepare_count).pack(side="right",padx=(0,8))
+        ctk.CTkButton(bar,text="Editar produto",image=self.icons["edit"],width=125,height=36,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.edit_selected_count_product).pack(side="right",padx=(0,8))
         ctk.CTkButton(bar,text="Explicar",width=90,height=36,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.explain_confidence).pack(side="right",padx=(0,8))
         self.count_search=ctk.CTkEntry(bar,placeholder_text="Filtrar produto...",width=165,height=36,corner_radius=9);self.count_search.pack(side="right",padx=(0,8));self.count_search.insert(0,self.settings.get("count_search",""));self.count_search.bind("<KeyRelease>",lambda _event:(self.refresh_counts(),self.save_interface_state()))
-        self.count_tree=self.table(listing,("product","stock","checkin","date","responsible","confidence","difference"),("Produto","Estoque atual","Check-in","Última contagem","Responsável","Confiança","Diferença"),(170,75,75,120,80,85,85));self.count_tree.pack(fill="both",expand=True,padx=20,pady=(0,20));self.count_tree.bind("<Double-1>",lambda _e:self.prepare_count());self.count_confidence_cells=TreeConfidenceOverlay(self.count_tree,COLORS,activate=self.prepare_count);self.count_age_cells=TreeRelativeDateOverlay(self.count_tree,COLORS);self.configure_tables();return page
+        self.count_tree=self.table(listing,("product","stock","checkin","date","responsible","confidence","difference"),("Produto","Estoque atual","Check-in","Última contagem","Responsável","Confiança","Diferença"),(170,75,75,120,80,85,85));self.count_tree.pack(fill="both",expand=True,padx=20,pady=(0,20));self.count_tree.bind("<<TreeviewSelect>>",self.on_count_tree_select);self.count_tree.bind("<Double-1>",lambda _e:self.prepare_count());self.count_confidence_cells=TreeConfidenceOverlay(self.count_tree,COLORS,activate=self.prepare_count);self.count_age_cells=TreeRelativeDateOverlay(self.count_tree,COLORS);self.configure_tables()
+        if not self.count_product_suggestions_collapsed:self.after_idle(self.show_count_product_suggestions)
+        return page
+
+    def count_product_results(self,query=""):
+        return [product for product in self.db.products() if product_matches_search(product,query)]
+
+    def hide_count_product_suggestions(self):
+        if hasattr(self,"count_product_suggestions"):
+            self.count_product_suggestions.pack_forget();self.count_product_suggestions_collapsed=True;self.count_product_suggestions_toggle.configure(image=self.icons["expand"])
+
+    def toggle_count_product_suggestions(self):
+        self.count_product_suggestions_collapsed=not self.count_product_suggestions_collapsed
+        if self.count_product_suggestions_collapsed:self.hide_count_product_suggestions()
+        else:self.show_count_product_suggestions();self.c_product_entry.focus_set()
+        self.save_interface_state()
+
+    def show_count_product_suggestions(self,force=False):
+        if not hasattr(self,"count_product_suggestions"):return
+        if force:self.count_product_suggestions_collapsed=False
+        self.count_product_suggestions_toggle.configure(image=self.icons["expand" if self.count_product_suggestions_collapsed else "collapse"])
+        if self.count_product_suggestions_collapsed:
+            self.count_product_suggestions.pack_forget();return
+        for child in self.count_product_suggestions.winfo_children():child.destroy()
+        results=self.count_product_results(self.c_product.get())
+        if not results:
+            ctk.CTkLabel(self.count_product_suggestions,text="Nenhum produto encontrado",height=36,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(fill="x",padx=10,pady=4)
+        else:
+            for product in results:
+                ctk.CTkButton(self.count_product_suggestions,text=self.movement_product_display(product),anchor="w",height=34,corner_radius=6,fg_color="transparent",hover_color=COLORS["accent_soft"],text_color=COLORS["text"],command=lambda product_id=int(product["id"]):self.select_count_product(product_id,focus_quantity=True)).pack(fill="x",padx=5,pady=2)
+        self.count_product_suggestions.pack(fill="x",padx=20,pady=(0,8),before=self.count_current)
+
+    def on_count_product_search(self,event=None):
+        if event and event.keysym in ("Return","Escape"):
+            if event.keysym=="Escape":self.hide_count_product_suggestions()
+            return
+        selected=self.db.product(self.c_selected_product_id) if self.c_selected_product_id else None
+        if not selected or self.c_product.get()!=self.movement_product_display(selected):self.c_selected_product_id=None;self.update_count_current()
+        self.show_count_product_suggestions(force=True)
+
+    def select_first_count_product_suggestion(self):
+        results=self.count_product_results(self.c_product.get())
+        if results:self.select_count_product(int(results[0]["id"]),focus_quantity=True)
+
+    def select_count_product(self,product_id,focus_quantity=False):
+        product=self.db.product(int(product_id))
+        if not product:return
+        self.c_selected_product_id=int(product_id);self.c_product.set(self.movement_product_display(product));self.hide_count_product_suggestions();self.update_count_current()
+        if focus_quantity:self.c_quantity_entry.focus_set()
 
     def update_count_current(self):
-        pid=self.product_map().get(self.c_product.get()) if hasattr(self,"c_product") else None
+        pid=self.c_selected_product_id if hasattr(self,"c_selected_product_id") else None
         if not hasattr(self,"count_current"):return
         product=self.db.product(pid) if pid else None
         self.count_current.configure(text=f"Saldo do sistema: {fmt_number(product['stock'])} {product['unit']}" if product else "Saldo do sistema: —")
@@ -1930,8 +1984,22 @@ class EstoqueApp(ctk.CTk):
     def prepare_count(self):
         pid=self.selected_count_product()
         if not pid:messagebox.showinfo(APP_NAME,"Selecione um produto para contar.",parent=self);return
-        label=next((text for text,product_id in self.product_map().items() if product_id==pid),"")
-        self.c_product.set(label);self.update_count_current();self.c_quantity_entry.focus_set()
+        self.select_count_product(pid,focus_quantity=True)
+
+    def on_count_tree_select(self,_event=None):
+        pid=self.selected_count_product()
+        if pid:self.select_count_product(pid)
+
+    def edit_selected_count_product(self):
+        pid=self.selected_count_product()
+        if not pid:messagebox.showinfo(APP_NAME,"Selecione um produto para editar.",parent=self);return
+        product=self.db.product(pid)
+        if not product:return
+        dialog=ProductDialog(self,product);self.wait_window(dialog)
+        if not dialog.result:return
+        try:self.db.save_product(dialog.result,pid)
+        except ValueError as error:messagebox.showwarning(APP_NAME,str(error),parent=self);return
+        self.refresh_all();self.select_count_product(pid);self.count_tree.selection_set(str(pid));self.count_tree.see(str(pid))
 
     def explain_confidence(self):
         pid=self.selected_count_product()
@@ -1940,7 +2008,7 @@ class EstoqueApp(ctk.CTk):
         messagebox.showinfo(APP_NAME,f"{product_label(product)}\n\nConfiança: {trust['score']}% — {trust['level']}\nÚltima contagem: {last}\nTempo considerado: {trust['days']} dia(s)\nMovimentações desde a contagem: {trust['movement_count']}\nQuantidade movimentada: {fmt_number(trust['moved_units'])} {product['unit']}\n\nQuanto mais tempo, operações diárias e unidades movimentadas, maior a necessidade de uma nova conferência.",parent=self)
 
     def register_count(self):
-        pid=self.product_map().get(self.c_product.get());responsible=self.c_responsible.get().strip()
+        pid=self.c_selected_product_id;responsible=self.c_responsible.get().strip()
         if not pid:messagebox.showwarning(APP_NAME,"Selecione um produto.",parent=self);return
         if responsible not in self.user_names():messagebox.showwarning(APP_NAME,"Selecione um usuário cadastrado como responsável pela contagem.",parent=self);return
         try:amount=float(self.c_quantity.get().replace(",","."));count_date=self.c_date_entry.get_date()
@@ -1953,7 +2021,9 @@ class EstoqueApp(ctk.CTk):
 
     def refresh_counts(self):
         if not hasattr(self,"count_tree"):return
-        mapping=self.product_map();self.c_product_combo.configure(values=list(mapping)or[""]);search=self.count_search.get() if hasattr(self,"count_search") else "";items=self.db.products(search);self.count_tree.delete(*self.count_tree.get_children());all_items=self.db.products();pending=counted_today=differences_today=total_score=0;today=date.today().isoformat();infos={};visible_scores={};visible_ages={}
+        selected_product=self.db.product(self.c_selected_product_id) if getattr(self,"c_selected_product_id",None) else None
+        if not selected_product:self.c_selected_product_id=None;self.c_product.set("");self.update_count_current()
+        search=self.count_search.get() if hasattr(self,"count_search") else "";items=self.db.products(search);self.count_tree.delete(*self.count_tree.get_children());all_items=self.db.products();pending=counted_today=differences_today=total_score=0;today=date.today().isoformat();infos={};visible_scores={};visible_ages={}
         for p in all_items:
             trust=self.db.stock_confidence(int(p["id"]),float(p["stock"]));infos[int(p["id"])]=trust;pending+=trust["checkin"]=="PENDENTE";counted_today+=trust["last_date"]==today;differences_today+=trust["last_date"]==today and trust["last_difference"] is not None and abs(trust["last_difference"])>.0000001;total_score+=trust["score"]
         selected_filter=self.count_filter.get() if hasattr(self,"count_filter") else "todos"
@@ -1966,6 +2036,7 @@ class EstoqueApp(ctk.CTk):
         self.count_age_cells.set_ages(visible_ages)
         average=round(total_score/len(all_items)) if all_items else 0
         for label,text in zip(self.count_cards,(str(pending),str(counted_today),str(differences_today),f"{average}%")):label.configure(text=text)
+        if not self.count_product_suggestions_collapsed:self.show_count_product_suggestions()
 
     def movements_page(self):
         page = SmoothScrollableFrame(self.content, fg_color="transparent", corner_radius=0, scrollbar_button_color=COLORS["accent"], scrollbar_button_hover_color=COLORS["accent_hover"])

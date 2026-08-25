@@ -24,7 +24,8 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Aba **Estoque atual** com saldo, situação e confiança; a última contagem fica somente na aba **Contagem**
 - Estoque atual agrupado com separadores visuais, produtos em ordem alfabética e saldos coloridos por quantidade
 - Estoque negativo permitido, com aviso persistente por produto e saldo destacado em vinho escuro
-- Aba **Contagem** no formato de check-in da planilha, com quantidade física, data e responsável selecionado entre os usuários ativos cadastrados
+- Aba **Contagem** no formato de check-in da planilha, com busca intuitiva por produto, grupo ou variação, lista resumida de resultados, quantidade física, data e responsável selecionado entre os usuários ativos cadastrados
+- Na lista da Contagem, um clique prepara o produto para conferência e a ação **Editar produto** abre o cadastro do item selecionado
 - Última contagem em tempo relativo e colorido: hoje, dias, semanas, meses ou anos atrás
 - Aba **Cadastro** com gerenciadores separados e ilustrados para Usuários, Operações, Grupos e Produtos
 - Operações padrão e personalizadas visíveis no mesmo gerenciador, com edição e remoção segura
