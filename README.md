@@ -11,7 +11,7 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Ao entrar, ao alterar dados e a cada 20 segundos, o aplicativo compara a cópia local com a nuvem e atualiza os outros computadores.
 - A senha não é armazenada; somente a sessão de acesso fica salva neste computador.
 - Antes de baixar e substituir os dados locais, o aplicativo cria um backup automático.
-- A aba **Movimentações** possui rolagem vertical e permite recolher ou expandir a lista pesquisável de produtos.
+- A aba **Movimentações** possui rolagem suave e isolada: listas e tabelas internas não arrastam a página ao mesmo tempo.
 - A tabela **Posição do estoque** possui barra de rolagem própria para suportar catálogos maiores.
 - O botão de recolher produtos fica integrado à busca, com ícone de pesquisa ajustado para melhor legibilidade.
 
@@ -30,12 +30,17 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Operações padrão e personalizadas visíveis no mesmo gerenciador, com edição e remoção segura
 - Movimentações em lote no estilo carrinho: vários produtos, uma operação, data, observação e usuário responsável
 - Revisão, edição e remoção dos itens antes de salvar o conjunto
+- Soma em tempo real da quantidade total de itens informados na movimentação
+- Páginas internas separadas para **Nova movimentação** e **Histórico**, preservando o padrão visual do aplicativo
+- Histórico consolidado: cada linha representa uma movimentação fechada, com janela de detalhes dos produtos
+- Edição e exclusão do conjunto completo, com recálculo seguro de todos os saldos envolvidos
 - Importação de listas PDF da Shopee e do Mercado Livre usando apenas SKU e quantidade
 - Leitura posicional da Lista Shopee, inclusive quando o SKU ocupa mais de uma linha
 - Localização automática das páginas de lista no final de PDFs com etiquetas e notas fiscais do Mercado Livre
 - Memória sincronizada dos vínculos entre cada SKU e um ou mais produtos do estoque
 - Conferência por SKU e baixa consolidada por produto antes de levar a lista para Movimentações
 - Gerenciador de SKUs na aba Cadastro para criar, pesquisar, alterar ou excluir vínculos futuros
+- Editor de SKU responsivo com busca curta, tabela virtualizada e seleção de produtos por clique, sem criar dezenas de controles pesados
 - Aba **Simulação** para planejar entradas ou saídas de vários produtos e comparar simultaneamente a posição completa do estoque atual com o saldo projetado, sem registrar movimentações
 - Rascunho da simulação salvo somente no computador do usuário, fora da sincronização do Supabase
 - Pesquisa rápida na movimentação por parte do nome, grupo, variação ou categoria, ignorando diferenças de acento e maiúsculas
@@ -44,7 +49,6 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Mini velocímetros substituem os percentuais nas colunas de confiança das tabelas
 - Linhas divisórias finas e adaptadas ao tema em todas as tabelas do aplicativo
 - Entradas, saídas, ajustes e inventário com data editável
-- Edição e exclusão de movimentações com recálculo seguro dos saldos
 - Campo de data mascarado em `dd/mm/aa` e calendário para seleção com o mouse
 - Histórico completo de movimentações
 - Backup e restauração do banco SQLite

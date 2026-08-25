@@ -4,6 +4,7 @@ import calendar
 from datetime import date, datetime
 import math
 import tkinter as tk
+import weakref
 
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageTk
@@ -63,6 +64,124 @@ def _appearance_color(value: str | tuple[str, str]) -> str:
     return value
 
 
+def tree_wheel_units(delta: int) -> int:
+    """Translate a Windows wheel/touchpad delta into a responsive row step."""
+    if not delta:
+        return 0
+    magnitude = max(1, round(abs(delta) / 40))
+    return -magnitude if delta > 0 else magnitude
+
+
+def canvas_wheel_impulse(delta: int) -> float:
+    """Translate a wheel delta into a pixel-like impulse for smooth animation."""
+    return max(-320.0, min(320.0, -float(delta) * 0.7))
+
+
+class SmoothScrollableFrame(ctk.CTkScrollableFrame):
+    """CTk scroll area with smooth motion and isolated nested scrolling."""
+
+    _instances: weakref.WeakSet = weakref.WeakSet()
+
+    def __init__(self, *args, **kwargs):
+        self._wheel_velocity = 0.0
+        self._smooth_scroll_job = None
+        self._scroll_axis = "y"
+        super().__init__(*args, **kwargs)
+        self._instances.add(self)
+
+    @staticmethod
+    def _ancestor_distance(widget, target) -> int | None:
+        distance = 0
+        current = widget
+        while current is not None:
+            if current == target:
+                return distance
+            current = getattr(current, "master", None)
+            distance += 1
+        return None
+
+    @staticmethod
+    def _inside_native_scroll_widget(widget) -> bool:
+        current = widget
+        while current is not None:
+            try:
+                if current.winfo_class() in {"Treeview", "Text", "Listbox"}:
+                    return True
+            except tk.TclError:
+                return False
+            current = getattr(current, "master", None)
+        return False
+
+    @classmethod
+    def _nearest_scrollable(cls, widget):
+        candidates = []
+        for candidate in tuple(cls._instances):
+            try:
+                if not candidate.winfo_exists() or candidate.winfo_toplevel() != widget.winfo_toplevel():
+                    continue
+            except tk.TclError:
+                continue
+            distances = [
+                cls._ancestor_distance(widget, target)
+                for target in (candidate, candidate._parent_canvas, candidate._parent_frame)
+            ]
+            visible_distances = [distance for distance in distances if distance is not None]
+            if visible_distances:
+                candidates.append((min(visible_distances), candidate))
+        return min(candidates, key=lambda item: item[0])[1] if candidates else None
+
+    def _mouse_wheel_all(self, event):
+        if self._inside_native_scroll_widget(event.widget):
+            return None
+        if self._nearest_scrollable(event.widget) is not self:
+            return None
+        axis = "x" if self._shift_pressed else "y"
+        canvas_view = self._parent_canvas.xview() if axis == "x" else self._parent_canvas.yview()
+        if canvas_view == (0.0, 1.0):
+            return "break"
+        self._scroll_axis = axis
+        self._wheel_velocity = max(-320.0, min(320.0, self._wheel_velocity + canvas_wheel_impulse(event.delta)))
+        if self._smooth_scroll_job is None:
+            self._smooth_scroll_job = self.after(8, self._animate_scroll)
+        return "break"
+
+    def _animate_scroll(self):
+        self._smooth_scroll_job = None
+        try:
+            if not self.winfo_exists():
+                return
+            step = int(self._wheel_velocity * 0.32)
+            if not step and abs(self._wheel_velocity) >= 0.8:
+                step = 1 if self._wheel_velocity > 0 else -1
+            if not step:
+                self._wheel_velocity = 0.0
+                return
+            view_before = self._parent_canvas.xview() if self._scroll_axis == "x" else self._parent_canvas.yview()
+            if self._scroll_axis == "x":
+                self._parent_canvas.xview_scroll(step, "units")
+                view_after = self._parent_canvas.xview()
+            else:
+                self._parent_canvas.yview_scroll(step, "units")
+                view_after = self._parent_canvas.yview()
+            self._wheel_velocity *= 0.68
+            if view_after != view_before and abs(self._wheel_velocity) >= 0.8:
+                self._smooth_scroll_job = self.after(12, self._animate_scroll)
+            else:
+                self._wheel_velocity = 0.0
+        except tk.TclError:
+            self._wheel_velocity = 0.0
+
+    def destroy(self):
+        if self._smooth_scroll_job is not None:
+            try:
+                self.after_cancel(self._smooth_scroll_job)
+            except tk.TclError:
+                pass
+            self._smooth_scroll_job = None
+        self._instances.discard(self)
+        super().destroy()
+
+
 def mini_confidence_gauge(score: int, colors: dict, width: int = 66, height: int = 28) -> Image.Image:
     """Render a compact, antialiased confidence dial for a table cell."""
     scale = 4
@@ -104,7 +223,7 @@ class TreeConfidenceOverlay:
         self.labels: list[tk.Label] = []
         self.images: list[ImageTk.PhotoImage] = []
         self._job = None
-        for event in ("<Configure>", "<MouseWheel>", "<Button-4>", "<Button-5>", "<KeyRelease>", "<ButtonRelease-1>", "<<TreeviewSelect>>"):
+        for event in ("<Configure>", "<MouseWheel>", "<Button-4>", "<Button-5>", "<KeyRelease>", "<ButtonRelease-1>", "<<TreeviewSelect>>", "<<TreeViewportChanged>>"):
             self.tree.bind(event, self.schedule, add="+")
 
     def set_scores(self, scores: dict[int | str, int]):
@@ -133,8 +252,10 @@ class TreeConfidenceOverlay:
             self.activate()
 
     def _scroll(self, event):
-        direction = -1 if event.delta > 0 else 1
-        self.tree.yview_scroll(direction, "units")
+        units = tree_wheel_units(event.delta)
+        if units:
+            self.tree.yview_scroll(units, "units")
+            self.tree.event_generate("<<TreeViewportChanged>>")
         self.schedule()
         return "break"
 
@@ -230,7 +351,7 @@ class TreeRowSeparatorOverlay:
         self.tree, self.colors = tree, colors
         self.lines: list[tk.Frame] = []
         self._job = None
-        for event in ("<Configure>", "<MouseWheel>", "<Button-4>", "<Button-5>", "<KeyRelease>", "<ButtonRelease-1>"):
+        for event in ("<Configure>", "<MouseWheel>", "<Button-4>", "<Button-5>", "<KeyRelease>", "<ButtonRelease-1>", "<<TreeViewportChanged>>"):
             self.tree.bind(event, self.schedule, add="+")
 
     def schedule(self, _event=None):
@@ -245,8 +366,10 @@ class TreeRowSeparatorOverlay:
         self._job = self.tree.after_idle(self.redraw)
 
     def _scroll(self, event):
-        direction = -1 if event.delta > 0 else 1
-        self.tree.yview_scroll(direction, "units")
+        units = tree_wheel_units(event.delta)
+        if units:
+            self.tree.yview_scroll(units, "units")
+            self.tree.event_generate("<<TreeViewportChanged>>")
         self.schedule()
         return "break"
 

@@ -11,7 +11,7 @@ from cloud_sync import CloudSync, TABLES
 from premium_icons import app_icon, application_icon_path
 from PIL import Image
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
-from premium_widgets import count_age_color, stock_quantity_color
+from premium_widgets import canvas_wheel_impulse, count_age_color, stock_quantity_color, tree_wheel_units
 
 
 class InventoryDatabaseTests(unittest.TestCase):
@@ -107,6 +107,31 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertGreater(batch_id, 0)
         self.assertEqual(self.db.stock(product_id), 7)
 
+    def test_closed_movement_history_updates_and_deletes_whole_batch(self):
+        first_id = self.create_product(name="MARINHO")
+        self.db.save_product({"name":"VERDE","category":"Bolsa maternidade","group_name":"4 PEÇAS","variant":"Verde","unit":"un","minimum":0,"photo":"","notes":""})
+        second_id = int(self.db.db.execute("SELECT MAX(id) id FROM products").fetchone()["id"])
+        self.db.add_movement_batch("inventario", [(first_id, 10), (second_id, 8)], "2026-08-20", "Contagem inicial", "Ana")
+        sale_id = self.db.add_movement_batch("saida", [(first_id, 3), (second_id, 2)], "2026-08-21", "Pedido 15", "Vinicius")
+
+        history = self.db.movement_history()
+        sale = next(item for item in history if item["history_key"] == f"batch:{sale_id}")
+        self.assertEqual(sale["item_count"], 2)
+        self.assertIn("MARINHO", sale["product_summary"])
+        self.assertIn("VERDE", sale["product_summary"])
+
+        self.db.update_movement_batch(sale_id, "saida", [(first_id, 4), (second_id, 1)], "2026-08-22", "Pedido corrigido", "Larissa")
+        self.assertEqual(self.db.stock(first_id), 6)
+        self.assertEqual(self.db.stock(second_id), 7)
+        updated = self.db.movement_batch(sale_id)
+        self.assertEqual(updated["reason"], "Pedido corrigido")
+        self.assertEqual(updated["performed_by"], "Larissa")
+
+        self.db.delete_movement_batch(sale_id)
+        self.assertEqual(self.db.stock(first_id), 10)
+        self.assertEqual(self.db.stock(second_id), 8)
+        self.assertNotIn(f"batch:{sale_id}", [item["history_key"] for item in self.db.movement_history()])
+
     def test_outgoing_movement_can_leave_stock_negative_and_reports_product(self):
         product_id = self.create_product()
         self.db.add_movement_batch("saida", [(product_id, 3)], date.today().isoformat(), "Venda antecipada", "Teste")
@@ -185,6 +210,10 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertEqual(self.db.sku_mapping_for("caramelo leao 2p")["id"], mapping_id)
         self.assertEqual({row["id"] for row in self.db.sku_mapping_products(mapping_id)}, {first_id, second_id})
         self.assertIn("sku_mappings", CloudSync(app.data_dir(), {}).export_payload(self.db.db)["tables"])
+
+        summarized = self.db.sku_mappings("mochila")
+        self.assertEqual(len(summarized), 1)
+        self.assertIn("MOCHILA", summarized[0]["product_labels"])
 
     def test_mapped_sales_list_consolidates_products_shared_by_skus(self):
         first_id = self.create_product(name="BOLSA", variant="Caramelo")
@@ -278,6 +307,21 @@ class LocalStateTests(unittest.TestCase):
         preferences.save()
 
         self.assertEqual(LocalPreferences(path).values["last_page"], "simulation")
+
+    def test_movement_internal_page_is_restored(self):
+        path = self.folder / "ui-preferences.json"
+        preferences = LocalPreferences(path)
+        preferences.values["movement_section"] = "history"
+        preferences.save()
+        self.assertEqual(LocalPreferences(path).values["movement_section"], "history")
+
+
+class ScrollingTests(unittest.TestCase):
+    def test_tree_wheel_moves_multiple_rows_and_canvas_keeps_fractional_impulse(self):
+        self.assertEqual(tree_wheel_units(120), -3)
+        self.assertEqual(tree_wheel_units(-240), 6)
+        self.assertEqual(canvas_wheel_impulse(120), -84.0)
+        self.assertEqual(canvas_wheel_impulse(-120), 84.0)
 
 
 class SharedCloudSyncTests(unittest.TestCase):
