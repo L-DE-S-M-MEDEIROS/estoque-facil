@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import app
+from pypdf import PdfReader
 from cloud_sync import CloudSync, TABLES
 from premium_icons import app_icon, application_icon_path
 from PIL import Image
@@ -188,6 +189,28 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertEqual(comparison[1]["current"], 7)
         self.assertEqual(comparison[1]["projected"], 7)
         self.assertIsNone(comparison[1]["quantity"])
+
+    def test_simulation_selected_rows_include_only_the_assembled_set(self):
+        products = [
+            {"id":1,"name":"MARINHO","group_name":"4 PEÇAS","variant":"","category":"","stock":80,"unit":"un"},
+            {"id":2,"name":"CARAMELO","group_name":"4 PEÇAS","variant":"","category":"","stock":50,"unit":"un"},
+        ]
+        rows = app.simulation_selected_rows(products,[{"product_id":1,"quantity":30}],"saida")
+        self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]["product_id"],1)
+        self.assertEqual(rows[0]["projected"],50)
+
+    def test_simulation_print_pdf_contains_only_product_and_simulated_quantity(self):
+        products = [{"id":1,"name":"MARINHO","group_name":"4 PEÇAS","variant":"","category":"","stock":80,"unit":"un"}]
+        rows = app.simulation_selected_rows(products,[{"product_id":1,"quantity":30}],"saida")
+        output = Path(self.temporary_directory.name) / "lista-simulacao.pdf"
+        app.build_simulation_print_pdf(output,rows,"saida",datetime(2026,8,25,14,30))
+        text = "\n".join(page.extract_text() or "" for page in PdfReader(output).pages)
+        self.assertIn("4 PEÇAS",text)
+        self.assertIn("MARINHO",text)
+        self.assertIn("30 un",text)
+        self.assertNotIn("Estoque atual",text)
+        self.assertNotIn("Saldo projetado",text)
 
     def test_cloud_payload_contains_inventory_and_photo(self):
         photo = app.data_dir() / "fotos" / "produto.png"

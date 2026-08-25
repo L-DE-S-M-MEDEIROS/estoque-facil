@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import math
+import os
 import queue
 import re
 import shutil
@@ -16,6 +17,13 @@ from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
 from PIL import ImageTk
+from reportlab.lib import colors as pdf_colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from xml.sax.saxutils import escape as xml_escape
 
 from premium_icons import app_icon, application_icon_path, brand_mark, icon
 from premium_widgets import MaskedDateEntry, SmoothScrollableFrame, TreeConfidenceOverlay, TreeRelativeDateOverlay, TreeRowSeparatorOverlay, TreeStockOverlay, confidence_tier, tree_wheel_units
@@ -25,7 +33,7 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.1.14"
+APP_VERSION = "1.1.15"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -234,6 +242,66 @@ def simulation_stock_comparison(products, items, operation: str) -> list[dict]:
             }
         )
     return comparison
+
+
+def simulation_selected_rows(products, items, operation: str) -> list[dict]:
+    """Return only products that belong to the current simulation set."""
+
+    return [
+        row
+        for row in simulation_stock_comparison(products, items, operation)
+        if row["quantity"] is not None
+    ]
+
+
+def build_simulation_print_pdf(output_path: Path, rows: list[dict], operation: str, generated_at: datetime | None = None) -> Path:
+    """Create a separation list containing only simulated products and quantities."""
+
+    if not rows:
+        raise ValueError("Adicione produtos à simulação antes de imprimir.")
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = generated_at or datetime.now()
+    operation_label = "Entrada" if operation == "entrada" else "Saída"
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("SimulationTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=18, leading=22, textColor=pdf_colors.HexColor("#202936"), alignment=TA_LEFT, spaceAfter=5*mm)
+    meta_style = ParagraphStyle("SimulationMeta", parent=styles["BodyText"], fontName="Helvetica", fontSize=9, leading=12, textColor=pdf_colors.HexColor("#657386"), alignment=TA_LEFT)
+    cell_style = ParagraphStyle("SimulationCell", parent=styles["BodyText"], fontName="Helvetica", fontSize=9.5, leading=12, textColor=pdf_colors.HexColor("#202936"), alignment=TA_LEFT)
+    quantity_style = ParagraphStyle("SimulationQuantity", parent=cell_style, alignment=TA_CENTER)
+    document = SimpleDocTemplate(str(output), pagesize=A4, rightMargin=16*mm, leftMargin=16*mm, topMargin=16*mm, bottomMargin=17*mm, title="Lista de separação - Simulação", author=APP_NAME)
+    story = [
+        Paragraph("Lista de separação - Simulação", title_style),
+        Paragraph(f"Operação simulada: {operation_label} &nbsp;&nbsp;|&nbsp;&nbsp; {len(rows)} produto(s) &nbsp;&nbsp;|&nbsp;&nbsp; Gerada em {timestamp.strftime('%d/%m/%Y às %H:%M')}", meta_style),
+        Spacer(1, 6*mm),
+    ]
+    table_data = [[Paragraph("Produto", cell_style), Paragraph("Quantidade simulada", quantity_style)]]
+    for row in rows:
+        product = row["product"]
+        table_data.append([
+            Paragraph(xml_escape(product_label(product)), cell_style),
+            Paragraph(f"{fmt_number(row['quantity'])} {xml_escape(str(product['unit']))}", quantity_style),
+        ])
+    table = Table(table_data, colWidths=[132*mm, 43*mm], repeatRows=1, hAlign="LEFT")
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), pdf_colors.HexColor("#E4F0F7")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), pdf_colors.HexColor("#245F89")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ALIGN", (1, 0), (1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.35, pdf_colors.HexColor("#D5DEE7")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [pdf_colors.white, pdf_colors.HexColor("#F8FAFC")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.append(table)
+
+    def draw_footer(canvas, doc):
+        canvas.saveState();canvas.setStrokeColor(pdf_colors.HexColor("#D5DEE7"));canvas.line(16*mm,12*mm,A4[0]-16*mm,12*mm);canvas.setFont("Helvetica",8);canvas.setFillColor(pdf_colors.HexColor("#748092"));canvas.drawString(16*mm,7.5*mm,APP_NAME);canvas.drawRightString(A4[0]-16*mm,7.5*mm,f"Página {doc.page}");canvas.restoreState()
+
+    document.build(story,onFirstPage=draw_footer,onLaterPages=draw_footer)
+    return output
 
 
 def mapped_sales_list(database, items) -> tuple[list[dict], list[dict]]:
@@ -1552,7 +1620,7 @@ class EstoqueApp(ctk.CTk):
         self._last_window_state = self.settings.get("window_state", "zoomed") if self.settings.get("window_state") in ("normal", "zoomed") else "zoomed"
         apply_window_icon(self); self.protocol("WM_DELETE_WINDOW", self.close)
         self.brand_icon = brand_mark(86)
-        self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "simulation", "count", "settings", "registration", "user", "operation", "group", "plus", "search", "edit", "trash", "download", "upload", "refresh", "collapse", "expand")}
+        self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "simulation", "count", "settings", "registration", "user", "operation", "group", "plus", "search", "edit", "trash", "download", "upload", "refresh", "print", "collapse", "expand")}
         self.table_separators: list[TreeRowSeparatorOverlay] = []
         self.update_events: queue.Queue = queue.Queue(); self.update_busy = False; self.update_button = None
         self.cloud_events: queue.Queue = queue.Queue(); self.cloud_sync_busy = False; self.cloud_sync_pending = False; self.cloud_sync_timer = None
@@ -1780,7 +1848,7 @@ class EstoqueApp(ctk.CTk):
         self.sim_product_entry.grid(row=0,column=1,sticky="nsew",padx=(0,4),pady=3);self.sim_product_entry.bind("<KeyRelease>",lambda _event:self.on_simulation_product_search());self.sim_product_entry.bind("<Return>",lambda _event:self.select_first_simulation_product())
         self.sim_quantity_entry=ctk.CTkEntry(controls,textvariable=self.sim_quantity,placeholder_text="Ex.: 25",width=120,height=40,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface"])
         self.sim_quantity_entry.grid(row=1,column=2,sticky="ew",padx=8,pady=(0,8));self.sim_quantity_entry.bind("<Return>",lambda _event:self.add_simulation_item())
-        self.sim_add_button=ctk.CTkButton(controls,text="Adicionar / atualizar",width=155,height=40,corner_radius=9,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.add_simulation_item)
+        self.sim_add_button=ctk.CTkButton(controls,text="Adicionar ao conjunto",width=165,height=40,corner_radius=9,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.add_simulation_item)
         self.sim_add_button.grid(row=1,column=3,sticky="ew",padx=(8,20),pady=(0,8))
         self.sim_selected_stock=ctk.CTkLabel(controls,text="Selecione um produto para ver o saldo atual.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10),anchor="w")
         self.sim_selected_stock.grid(row=2,column=0,columnspan=4,sticky="ew",padx=20,pady=(0,8))
@@ -1797,12 +1865,14 @@ class EstoqueApp(ctk.CTk):
 
         self.simulation_result_card=Card(page);self.simulation_result_card.pack(fill="both",expand=True)
         result_bar=ctk.CTkFrame(self.simulation_result_card,fg_color="transparent");result_bar.pack(fill="x",padx=20,pady=(16,10))
-        ctk.CTkLabel(result_bar,text="Comparação simultânea — estoque atual x depois da simulação",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(side="left")
+        ctk.CTkLabel(result_bar,text="Produtos da simulação — atualização imediata do saldo projetado",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(side="left")
         ctk.CTkButton(result_bar,text="Limpar simulação",width=125,height=34,fg_color="transparent",hover_color=COLORS["surface_hover"],text_color=COLORS["danger"],command=self.clear_simulation).pack(side="right")
+        self.sim_print_button=ctk.CTkButton(result_bar,text="Imprimir lista",image=self.icons["print"],width=120,height=34,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.print_simulation);self.sim_print_button.pack(side="right",padx=(0,6))
         ctk.CTkButton(result_bar,text="Remover",image=self.icons["trash"],width=100,height=34,fg_color="transparent",hover_color=COLORS["surface_hover"],text_color=COLORS["danger"],command=self.remove_simulation_item).pack(side="right",padx=(0,6))
         ctk.CTkButton(result_bar,text="Editar",image=self.icons["edit"],width=92,height=34,fg_color="transparent",hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.edit_simulation_item).pack(side="right",padx=(0,6))
-        simulation_table=ctk.CTkFrame(self.simulation_result_card,fg_color="transparent");simulation_table.pack(fill="both",expand=True,padx=20,pady=(0,20));simulation_table.grid_columnconfigure(0,weight=1);simulation_table.grid_rowconfigure(0,weight=1)
-        self.simulation_tree=self.table(simulation_table,("product","current","movement","projected"),("Produto","Estoque atual","Operação simulada","Depois da simulação"),(360,130,150,150));self.simulation_tree.configure(height=10);self.simulation_tree.grid(row=0,column=0,sticky="nsew");self.simulation_tree.bind("<Double-1>",lambda _event:self.edit_simulation_item())
+        self.simulation_empty_label=ctk.CTkLabel(self.simulation_result_card,text="Adicione produtos acima para montar o conjunto da simulação.",height=38,corner_radius=9,fg_color=COLORS["surface_alt"],text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11))
+        simulation_table=ctk.CTkFrame(self.simulation_result_card,fg_color="transparent");self.simulation_table=simulation_table;simulation_table.pack(fill="both",expand=True,padx=20,pady=(0,20));simulation_table.grid_columnconfigure(0,weight=1);simulation_table.grid_rowconfigure(0,weight=1)
+        self.simulation_tree=self.table(simulation_table,("product","current","movement","projected"),("Produto","Estoque atual","Quantidade simulada","Saldo projetado"),(360,130,150,150));self.simulation_tree.configure(height=10);self.simulation_tree.grid(row=0,column=0,sticky="nsew");self.simulation_tree.bind("<Double-1>",lambda _event:self.edit_simulation_item())
         self.simulation_scrollbar=ctk.CTkScrollbar(simulation_table,orientation="vertical",command=self.simulation_tree.yview,button_color=COLORS["accent"],button_hover_color=COLORS["accent_hover"]);self.simulation_scrollbar.grid(row=0,column=1,sticky="ns",padx=(8,0));self.simulation_tree.configure(yscrollcommand=self.simulation_scrollbar.set)
         self.simulation_current_cells=TreeStockOverlay(self.simulation_tree,COLORS,column="current")
         self.simulation_projected_cells=TreeStockOverlay(self.simulation_tree,COLORS,column="projected")
@@ -1869,6 +1939,12 @@ class EstoqueApp(ctk.CTk):
     def clear_simulation(self):
         if not self.simulation_items:return
         if messagebox.askyesno(APP_NAME,"Limpar todos os produtos desta simulação?",parent=self):self.simulation_items.clear();self.save_simulation_draft();self.refresh_simulation()
+    def print_simulation(self):
+        rows=simulation_selected_rows(self.db.products(),self.simulation_items,self.simulation_operation_key())
+        if not rows:messagebox.showinfo(APP_NAME,"Adicione produtos à simulação antes de imprimir.",parent=self);return
+        output=data_dir()/"impressoes"/f"lista-separacao-simulacao-{datetime.now().strftime('%Y%m%d-%H%M%S')}.pdf"
+        try:build_simulation_print_pdf(output,rows,self.simulation_operation_key());os.startfile(str(output))
+        except (OSError,ValueError) as error:messagebox.showerror(APP_NAME,f"Não foi possível abrir a lista para impressão.\n\n{error}\n\nArquivo: {output}",parent=self)
     def save_simulation_draft(self):
         if not hasattr(self,"simulation_items"):return
         self.simulation_store.values={"operation":self.simulation_operation_key(),"items":[dict(item) for item in self.simulation_items]};self.simulation_store.save()
@@ -1878,12 +1954,16 @@ class EstoqueApp(ctk.CTk):
         valid_items=[item for item in self.simulation_items if int(item["product_id"]) in product_ids]
         if len(valid_items)!=len(self.simulation_items):self.simulation_items=valid_items;self.save_simulation_draft()
         total=sum(float(item["quantity"]) for item in valid_items)
-        for row in simulation_stock_comparison(products,valid_items,operation):
+        rows=simulation_selected_rows(products,valid_items,operation)
+        for row in rows:
             product=row["product"];product_id=row["product_id"];current=row["current"];quantity=row["quantity"];projected=row["projected"]
             movement="—" if quantity is None else f"{sign}{fmt_number(quantity)} {product['unit']}"
             self.simulation_tree.insert("","end",iid=str(product_id),values=(product_label(product),"",movement,""));current_cells[product_id]=(current,f"{fmt_number(current)} {product['unit']}");projected_cells[product_id]=(projected,f"{fmt_number(projected)} {product['unit']}")
             if quantity is not None and projected<0:negative.append((product,projected))
         self.simulation_current_cells.set_quantities(current_cells);self.simulation_projected_cells.set_quantities(projected_cells)
+        self.sim_print_button.configure(state="normal" if rows else "disabled")
+        if rows:self.simulation_empty_label.pack_forget()
+        else:self.simulation_empty_label.pack(fill="x",padx=20,pady=(0,8),before=self.simulation_table)
         for label,text in zip(self.simulation_cards,(str(len(valid_items)),fmt_number(total),str(len(negative)))):label.configure(text=text,text_color=("#5A0B1A","#FFB3BE") if label is self.simulation_cards[2] and negative else COLORS["text"])
         if negative:
             details="\n".join(f"• {product_label(product)}: {fmt_number(projected)} {product['unit']}" for product,projected in negative);self.simulation_negative_text.configure(text=details)
