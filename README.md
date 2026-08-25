@@ -42,8 +42,8 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Conferência por SKU e baixa consolidada por produto antes de levar a lista para Movimentações
 - Gerenciador de SKUs na aba Cadastro para criar, pesquisar, alterar ou excluir vínculos futuros
 - Editor de SKU responsivo com busca curta, tabela virtualizada e seleção de produtos por clique, sem criar dezenas de controles pesados
-- Aba **Simulação** para montar um conjunto de entrada ou saída que mostra somente os produtos adicionados e recalcula imediatamente cada saldo projetado, sem registrar movimentações
-- Impressão da Simulação em PDF com uma lista de separação contendo somente produto e quantidade simulada, sem estoque atual ou saldo projetado
+- Aba **Simulação** para montar um conjunto de entrada ou saída que mostra somente os produtos adicionados e compara, lado a lado, o estoque atual com o saldo simulado, sem registrar movimentações
+- Impressão da Simulação em PDF com uma lista de separação contendo somente produto e quantidade simulada; o estoque atual e o saldo simulado permanecem exclusivos da tela do aplicativo
 - Rascunho da simulação salvo somente no computador do usuário, fora da sincronização do Supabase
 - Pesquisa rápida na movimentação por parte do nome, grupo, variação ou categoria, ignorando diferenças de acento e maiúsculas
 - Índice de confiança calculado pelos dias, frequência e volume movimentado desde a última contagem

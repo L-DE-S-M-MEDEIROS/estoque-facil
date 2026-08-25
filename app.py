@@ -33,7 +33,7 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.1.15"
+APP_VERSION = "1.1.16"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -1865,14 +1865,14 @@ class EstoqueApp(ctk.CTk):
 
         self.simulation_result_card=Card(page);self.simulation_result_card.pack(fill="both",expand=True)
         result_bar=ctk.CTkFrame(self.simulation_result_card,fg_color="transparent");result_bar.pack(fill="x",padx=20,pady=(16,10))
-        ctk.CTkLabel(result_bar,text="Produtos da simulação — atualização imediata do saldo projetado",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(side="left")
+        ctk.CTkLabel(result_bar,text="Produtos da simulação — estoque atual x simulado",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(side="left")
         ctk.CTkButton(result_bar,text="Limpar simulação",width=125,height=34,fg_color="transparent",hover_color=COLORS["surface_hover"],text_color=COLORS["danger"],command=self.clear_simulation).pack(side="right")
         self.sim_print_button=ctk.CTkButton(result_bar,text="Imprimir lista",image=self.icons["print"],width=120,height=34,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.print_simulation);self.sim_print_button.pack(side="right",padx=(0,6))
         ctk.CTkButton(result_bar,text="Remover",image=self.icons["trash"],width=100,height=34,fg_color="transparent",hover_color=COLORS["surface_hover"],text_color=COLORS["danger"],command=self.remove_simulation_item).pack(side="right",padx=(0,6))
         ctk.CTkButton(result_bar,text="Editar",image=self.icons["edit"],width=92,height=34,fg_color="transparent",hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.edit_simulation_item).pack(side="right",padx=(0,6))
         self.simulation_empty_label=ctk.CTkLabel(self.simulation_result_card,text="Adicione produtos acima para montar o conjunto da simulação.",height=38,corner_radius=9,fg_color=COLORS["surface_alt"],text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11))
         simulation_table=ctk.CTkFrame(self.simulation_result_card,fg_color="transparent");self.simulation_table=simulation_table;simulation_table.pack(fill="both",expand=True,padx=20,pady=(0,20));simulation_table.grid_columnconfigure(0,weight=1);simulation_table.grid_rowconfigure(0,weight=1)
-        self.simulation_tree=self.table(simulation_table,("product","current","movement","projected"),("Produto","Estoque atual","Quantidade simulada","Saldo projetado"),(360,130,150,150));self.simulation_tree.configure(height=10);self.simulation_tree.grid(row=0,column=0,sticky="nsew");self.simulation_tree.bind("<Double-1>",lambda _event:self.edit_simulation_item())
+        self.simulation_tree=self.table(simulation_table,("product","current","projected"),("Produto","Estoque atual","Simulado"),(420,190,190));self.simulation_tree.configure(height=10);self.simulation_tree.grid(row=0,column=0,sticky="nsew");self.simulation_tree.bind("<Double-1>",lambda _event:self.edit_simulation_item())
         self.simulation_scrollbar=ctk.CTkScrollbar(simulation_table,orientation="vertical",command=self.simulation_tree.yview,button_color=COLORS["accent"],button_hover_color=COLORS["accent_hover"]);self.simulation_scrollbar.grid(row=0,column=1,sticky="ns",padx=(8,0));self.simulation_tree.configure(yscrollcommand=self.simulation_scrollbar.set)
         self.simulation_current_cells=TreeStockOverlay(self.simulation_tree,COLORS,column="current")
         self.simulation_projected_cells=TreeStockOverlay(self.simulation_tree,COLORS,column="projected")
@@ -1950,15 +1950,14 @@ class EstoqueApp(ctk.CTk):
         self.simulation_store.values={"operation":self.simulation_operation_key(),"items":[dict(item) for item in self.simulation_items]};self.simulation_store.save()
     def refresh_simulation(self):
         if not hasattr(self,"simulation_tree"):return
-        self.simulation_tree.delete(*self.simulation_tree.get_children());current_cells={};projected_cells={};negative=[];operation=self.simulation_operation_key();sign="+" if operation=="entrada" else "−";products=self.db.products();product_ids={int(product["id"]) for product in products}
+        self.simulation_tree.delete(*self.simulation_tree.get_children());current_cells={};projected_cells={};negative=[];operation=self.simulation_operation_key();products=self.db.products();product_ids={int(product["id"]) for product in products}
         valid_items=[item for item in self.simulation_items if int(item["product_id"]) in product_ids]
         if len(valid_items)!=len(self.simulation_items):self.simulation_items=valid_items;self.save_simulation_draft()
         total=sum(float(item["quantity"]) for item in valid_items)
         rows=simulation_selected_rows(products,valid_items,operation)
         for row in rows:
             product=row["product"];product_id=row["product_id"];current=row["current"];quantity=row["quantity"];projected=row["projected"]
-            movement="—" if quantity is None else f"{sign}{fmt_number(quantity)} {product['unit']}"
-            self.simulation_tree.insert("","end",iid=str(product_id),values=(product_label(product),"",movement,""));current_cells[product_id]=(current,f"{fmt_number(current)} {product['unit']}");projected_cells[product_id]=(projected,f"{fmt_number(projected)} {product['unit']}")
+            self.simulation_tree.insert("","end",iid=str(product_id),values=(product_label(product),"",""));current_cells[product_id]=(current,f"{fmt_number(current)} {product['unit']}");projected_cells[product_id]=(projected,f"{fmt_number(projected)} {product['unit']}")
             if quantity is not None and projected<0:negative.append((product,projected))
         self.simulation_current_cells.set_quantities(current_cells);self.simulation_projected_cells.set_quantities(projected_cells)
         self.sim_print_button.configure(state="normal" if rows else "disabled")
