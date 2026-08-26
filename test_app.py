@@ -489,6 +489,44 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(LocalPreferences(path).values["movement_section"], "history")
 
 
+class CountFlowTests(unittest.TestCase):
+    def test_successful_count_reset_clears_product_search_and_restores_focus(self):
+        calls = []
+
+        class Value:
+            def __init__(self):
+                self.value = "FITA 5 PEÇAS • MARINHO [un]"
+
+            def set(self, value):
+                self.value = value
+
+        class Entry:
+            def focus_set(self):
+                calls.append("focus")
+
+        class CountScreen:
+            c_selected_product_id = 27
+            c_product = Value()
+            c_product_entry = Entry()
+
+            def hide_count_product_suggestions(self):
+                calls.append("hide")
+
+            def update_count_current(self):
+                calls.append("balance")
+
+            def after_idle(self, callback):
+                calls.append("scheduled")
+                callback()
+
+        screen = CountScreen()
+        app.EstoqueApp.reset_count_product_search(screen)
+
+        self.assertIsNone(screen.c_selected_product_id)
+        self.assertEqual(screen.c_product.value, "")
+        self.assertEqual(calls, ["hide", "balance", "scheduled", "focus"])
+
+
 class ScrollingTests(unittest.TestCase):
     def test_tree_wheel_moves_multiple_rows_and_canvas_keeps_fractional_impulse(self):
         self.assertEqual(tree_wheel_units(120), -3)

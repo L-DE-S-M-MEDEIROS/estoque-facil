@@ -33,7 +33,7 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 KIT_PIECE_COUNTS = (2, 4, 5)
@@ -2421,7 +2421,10 @@ class EstoqueApp(ctk.CTk):
         previous=self.db.stock(pid);difference=amount-previous
         try:self.db.add_movement(pid,"inventario",amount,count_date.isoformat(),self.c_note.get().strip() or "Contagem física",checked_by=responsible)
         except ValueError as error:messagebox.showwarning(APP_NAME,str(error),parent=self);return
-        self.settings["counter_name"]=responsible;self.save_settings();self.c_quantity.set("");self.c_note.set("");self.c_date_entry.set_date(date.today());self.refresh_all();self.update_count_current();messagebox.showinfo(APP_NAME,f"Contagem confirmada.\nDiferença encontrada: {'+' if difference>0 else ''}{fmt_number(difference)}",parent=self)
+        self.settings["counter_name"]=responsible;self.save_settings();self.c_quantity.set("");self.c_note.set("");self.c_date_entry.set_date(date.today());self.refresh_all();self.update_count_current();messagebox.showinfo(APP_NAME,f"Contagem confirmada.\nDiferença encontrada: {'+' if difference>0 else ''}{fmt_number(difference)}",parent=self);self.reset_count_product_search()
+
+    def reset_count_product_search(self):
+        self.c_selected_product_id=None;self.c_product.set("");self.hide_count_product_suggestions();self.update_count_current();self.after_idle(self.c_product_entry.focus_set)
 
     def refresh_counts(self):
         if not hasattr(self,"count_tree"):return
