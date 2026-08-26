@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import calendar
 from datetime import date, datetime
+from functools import lru_cache
 import math
 import tkinter as tk
 import weakref
@@ -78,14 +79,14 @@ def canvas_wheel_impulse(delta: int) -> float:
 
 
 class SmoothScrollableFrame(ctk.CTkScrollableFrame):
-    """CTk scroll area with smooth motion and isolated nested scrolling."""
+    """CTk scroll area with bounded smooth motion and isolated nested scrolling."""
 
     _instances: weakref.WeakSet = weakref.WeakSet()
 
     def __init__(self, *args, **kwargs):
-        self._wheel_velocity = 0.0
         self._smooth_scroll_job = None
         self._scroll_axis = "y"
+        self._scroll_target_pixels: float | None = None
         super().__init__(*args, **kwargs)
         self._instances.add(self)
 
@@ -139,37 +140,51 @@ class SmoothScrollableFrame(ctk.CTkScrollableFrame):
         canvas_view = self._parent_canvas.xview() if axis == "x" else self._parent_canvas.yview()
         if canvas_view == (0.0, 1.0):
             return "break"
+        if axis != self._scroll_axis:
+            self._scroll_target_pixels = None
         self._scroll_axis = axis
-        self._wheel_velocity = max(-320.0, min(320.0, self._wheel_velocity + canvas_wheel_impulse(event.delta)))
+        current, maximum, _extent = self._scroll_metrics(axis)
+        anchor = current if self._scroll_target_pixels is None else self._scroll_target_pixels
+        self._scroll_target_pixels = max(0.0, min(maximum, anchor + canvas_wheel_impulse(event.delta)))
         if self._smooth_scroll_job is None:
             self._smooth_scroll_job = self.after(8, self._animate_scroll)
         return "break"
+
+    def _scroll_metrics(self, axis: str) -> tuple[float, float, float]:
+        canvas = self._parent_canvas
+        bounds = canvas.bbox("all")
+        if not bounds:
+            return 0.0, 0.0, 0.0
+        extent = float(bounds[2] - bounds[0] if axis == "x" else bounds[3] - bounds[1])
+        viewport = float(canvas.winfo_width() if axis == "x" else canvas.winfo_height())
+        maximum = max(0.0, extent - viewport)
+        view = canvas.xview() if axis == "x" else canvas.yview()
+        return view[0] * extent, maximum, extent
 
     def _animate_scroll(self):
         self._smooth_scroll_job = None
         try:
             if not self.winfo_exists():
                 return
-            step = int(self._wheel_velocity * 0.32)
-            if not step and abs(self._wheel_velocity) >= 0.8:
-                step = 1 if self._wheel_velocity > 0 else -1
-            if not step:
-                self._wheel_velocity = 0.0
+            current, maximum, extent = self._scroll_metrics(self._scroll_axis)
+            target = self._scroll_target_pixels
+            if target is None or maximum <= 0:
+                self._scroll_target_pixels = None
                 return
-            view_before = self._parent_canvas.xview() if self._scroll_axis == "x" else self._parent_canvas.yview()
+            target = max(0.0, min(maximum, target))
+            distance = target - current
+            next_pixels = target if abs(distance) < 0.75 else current + distance * 0.42
+            fraction = max(0.0, min(1.0, next_pixels / extent))
             if self._scroll_axis == "x":
-                self._parent_canvas.xview_scroll(step, "units")
-                view_after = self._parent_canvas.xview()
+                self._parent_canvas.xview_moveto(fraction)
             else:
-                self._parent_canvas.yview_scroll(step, "units")
-                view_after = self._parent_canvas.yview()
-            self._wheel_velocity *= 0.68
-            if view_after != view_before and abs(self._wheel_velocity) >= 0.8:
+                self._parent_canvas.yview_moveto(fraction)
+            if abs(distance) >= 0.75:
                 self._smooth_scroll_job = self.after(12, self._animate_scroll)
             else:
-                self._wheel_velocity = 0.0
+                self._scroll_target_pixels = None
         except tk.TclError:
-            self._wheel_velocity = 0.0
+            self._scroll_target_pixels = None
 
     def destroy(self):
         if self._smooth_scroll_job is not None:
@@ -178,12 +193,13 @@ class SmoothScrollableFrame(ctk.CTkScrollableFrame):
             except tk.TclError:
                 pass
             self._smooth_scroll_job = None
+        self._scroll_target_pixels = None
         self._instances.discard(self)
         super().destroy()
 
 
-def mini_confidence_gauge(score: int, colors: dict, width: int = 66, height: int = 28) -> Image.Image:
-    """Render a compact, antialiased confidence dial for a table cell."""
+@lru_cache(maxsize=512)
+def _cached_mini_confidence_gauge(score: int, track: str, color: str, width: int, height: int) -> Image.Image:
     scale = 4
     pixel_width, pixel_height = width * scale, height * scale
     image = Image.new("RGBA", (pixel_width, pixel_height), (0, 0, 0, 0))
@@ -192,12 +208,9 @@ def mini_confidence_gauge(score: int, colors: dict, width: int = 66, height: int
     radius = min(round(pixel_width * .39), round(pixel_height * .82))
     stroke = max(8, round(pixel_width * .085))
     box = (center_x - radius, center_y - radius, center_x + radius, center_y + radius)
-    bounded = max(0, min(100, int(score)))
-    _level, tier_color = confidence_tier(bounded)
-    color = _appearance_color(tier_color)
-    draw.arc(box, start=180, end=360, fill=_appearance_color(colors["border"]), width=stroke)
-    draw.arc(box, start=180, end=180 + bounded * 1.8, fill=color, width=stroke)
-    angle = math.pi - math.pi * bounded / 100
+    draw.arc(box, start=180, end=360, fill=track, width=stroke)
+    draw.arc(box, start=180, end=180 + score * 1.8, fill=color, width=stroke)
+    angle = math.pi - math.pi * score / 100
     needle_radius = radius - round(stroke * .55)
     draw.line(
         (
@@ -214,14 +227,24 @@ def mini_confidence_gauge(score: int, colors: dict, width: int = 66, height: int
     return image.resize((width, height), Image.Resampling.LANCZOS)
 
 
+def mini_confidence_gauge(score: int, colors: dict, width: int = 66, height: int = 28) -> Image.Image:
+    """Render a cached compact, antialiased confidence dial for a table cell."""
+    bounded = max(0, min(100, int(score)))
+    _level, tier_color = confidence_tier(bounded)
+    return _cached_mini_confidence_gauge(
+        bounded, _appearance_color(colors["border"]), _appearance_color(tier_color), width, height,
+    )
+
+
 class TreeConfidenceOverlay:
     """Place crisp confidence dials over a ttk.Treeview confidence column."""
 
     def __init__(self, tree, colors: dict, column: str = "confidence", activate=None):
         self.tree, self.colors, self.column, self.activate = tree, colors, column, activate
         self.scores: dict[str, int] = {}
-        self.labels: list[tk.Label] = []
-        self.images: list[ImageTk.PhotoImage] = []
+        self.labels: dict[str, tk.Label] = {}
+        self.images: dict[str, ImageTk.PhotoImage] = {}
+        self._photo_cache: dict[tuple[int, int, int, str], ImageTk.PhotoImage] = {}
         self._job = None
         for event in ("<Configure>", "<MouseWheel>", "<Button-4>", "<Button-5>", "<KeyRelease>", "<ButtonRelease-1>", "<<TreeviewSelect>>", "<<TreeViewportChanged>>"):
             self.tree.bind(event, self.schedule, add="+")
@@ -237,9 +260,8 @@ class TreeConfidenceOverlay:
             return
         if not exists:
             return
-        if self._job is not None:
-            self.tree.after_cancel(self._job)
-        self._job = self.tree.after_idle(self.redraw)
+        if self._job is None:
+            self._job = self.tree.after(16, self.redraw)
 
     def _select(self, item_id: str):
         self.tree.selection_set(item_id)
@@ -259,41 +281,44 @@ class TreeConfidenceOverlay:
         self.schedule()
         return "break"
 
+    def _remove_hidden(self, visible: set[str]):
+        for item_id in set(self.labels) - visible:
+            self.labels.pop(item_id).destroy()
+            self.images.pop(item_id, None)
+
     def redraw(self):
         self._job = None
-        for label in self.labels:
-            label.destroy()
-        self.labels.clear()
-        self.images.clear()
         if not self.tree.winfo_exists():
             return
 
         selected = set(self.tree.selection())
         normal_background = _appearance_color(self.colors["surface"])
         selected_background = "#203C52" if ctk.get_appearance_mode() == "Dark" else "#DDEFFC"
+        visible: set[str] = set()
         for item_id, score in self.scores.items():
             bounds = self.tree.bbox(item_id, self.column)
             if not bounds:
                 continue
+            visible.add(item_id)
             x, y, cell_width, cell_height = bounds
             image_width = max(44, min(70, cell_width - 10))
             image_height = max(22, min(29, cell_height - 5))
-            rendered = mini_confidence_gauge(score, self.colors, image_width, image_height)
-            photo = ImageTk.PhotoImage(rendered)
-            label = tk.Label(
-                self.tree,
-                image=photo,
-                background=selected_background if item_id in selected else normal_background,
-                borderwidth=0,
-                highlightthickness=0,
-                cursor="hand2",
-            )
-            label.bind("<Button-1>", lambda _event, current=item_id: self._select(current))
-            label.bind("<Double-Button-1>", lambda _event, current=item_id: self._open(current))
-            label.bind("<MouseWheel>", self._scroll)
+            cache_key = (score, image_width, image_height, ctk.get_appearance_mode())
+            photo = self._photo_cache.get(cache_key)
+            if photo is None:
+                photo = ImageTk.PhotoImage(mini_confidence_gauge(score, self.colors, image_width, image_height))
+                self._photo_cache[cache_key] = photo
+            label = self.labels.get(item_id)
+            if label is None:
+                label = tk.Label(self.tree, borderwidth=0, highlightthickness=0, cursor="hand2")
+                label.bind("<Button-1>", lambda _event, current=item_id: self._select(current))
+                label.bind("<Double-Button-1>", lambda _event, current=item_id: self._open(current))
+                label.bind("<MouseWheel>", self._scroll)
+                self.labels[item_id] = label
+            label.configure(image=photo, background=selected_background if item_id in selected else normal_background)
             label.place(x=x + (cell_width - image_width) // 2, y=y + (cell_height - image_height) // 2)
-            self.labels.append(label)
-            self.images.append(photo)
+            self.images[item_id] = photo
+        self._remove_hidden(visible)
 
 
 class TreeStockOverlay(TreeConfidenceOverlay):
@@ -312,36 +337,33 @@ class TreeStockOverlay(TreeConfidenceOverlay):
 
     def redraw(self):
         self._job = None
-        for label in self.labels:
-            label.destroy()
-        self.labels.clear()
-        self.images.clear()
         if not self.tree.winfo_exists():
             return
 
         selected = set(self.tree.selection())
         normal_background = _appearance_color(self.colors["surface"])
         selected_background = "#203C52" if ctk.get_appearance_mode() == "Dark" else "#DDEFFC"
+        visible: set[str] = set()
         for item_id, (quantity, display) in self.quantities.items():
             bounds = self.tree.bbox(item_id, self.column)
             if not bounds:
                 continue
+            visible.add(item_id)
             x, y, cell_width, cell_height = bounds
             negative = quantity < 0
-            label = tk.Label(
-                self.tree,
+            label = self.labels.get(item_id)
+            if label is None:
+                label = tk.Label(self.tree, borderwidth=0, highlightthickness=0, font=("Inter", 11, "bold"), cursor="hand2")
+                label.bind("<Button-1>", lambda _event, current=item_id: self._select(current))
+                label.bind("<MouseWheel>", self._scroll)
+                self.labels[item_id] = label
+            label.configure(
                 text=display,
                 foreground="#FFFFFF" if negative else _appearance_color(stock_quantity_color(quantity)),
                 background=_appearance_color(NEGATIVE_STOCK_WINE) if negative else selected_background if item_id in selected else normal_background,
-                borderwidth=0,
-                highlightthickness=0,
-                font=("Inter", 11, "bold"),
-                cursor="hand2",
             )
-            label.bind("<Button-1>", lambda _event, current=item_id: self._select(current))
-            label.bind("<MouseWheel>", self._scroll)
             label.place(x=x, y=y, width=cell_width, height=max(1, cell_height - 1))
-            self.labels.append(label)
+        self._remove_hidden(visible)
 
 
 class TreeRowSeparatorOverlay:
@@ -349,7 +371,7 @@ class TreeRowSeparatorOverlay:
 
     def __init__(self, tree, colors: dict):
         self.tree, self.colors = tree, colors
-        self.lines: list[tk.Frame] = []
+        self.lines: dict[str, tk.Frame] = {}
         self._job = None
         for event in ("<Configure>", "<MouseWheel>", "<Button-4>", "<Button-5>", "<KeyRelease>", "<ButtonRelease-1>", "<<TreeViewportChanged>>"):
             self.tree.bind(event, self.schedule, add="+")
@@ -361,9 +383,8 @@ class TreeRowSeparatorOverlay:
             return
         if not exists:
             return
-        if self._job is not None:
-            self.tree.after_cancel(self._job)
-        self._job = self.tree.after_idle(self.redraw)
+        if self._job is None:
+            self._job = self.tree.after(16, self.redraw)
 
     def _scroll(self, event):
         units = tree_wheel_units(event.delta)
@@ -375,22 +396,26 @@ class TreeRowSeparatorOverlay:
 
     def redraw(self):
         self._job = None
-        for line in self.lines:
-            line.destroy()
-        self.lines.clear()
         if not self.tree.winfo_exists():
             return
         color = "#27303D" if ctk.get_appearance_mode() == "Dark" else "#E5E9ED"
         width = max(1, self.tree.winfo_width())
+        visible: set[str] = set()
         for item_id in self.tree.get_children(""):
             bounds = self.tree.bbox(item_id)
             if not bounds:
                 continue
+            visible.add(item_id)
             _x, y, _cell_width, row_height = bounds
-            line = tk.Frame(self.tree, height=1, background=color, borderwidth=0, highlightthickness=0)
-            line.bind("<MouseWheel>", self._scroll)
+            line = self.lines.get(item_id)
+            if line is None:
+                line = tk.Frame(self.tree, height=1, borderwidth=0, highlightthickness=0)
+                line.bind("<MouseWheel>", self._scroll)
+                self.lines[item_id] = line
+            line.configure(background=color)
             line.place(x=0, y=y + row_height - 1, width=width, height=1)
-            self.lines.append(line)
+        for item_id in set(self.lines) - visible:
+            self.lines.pop(item_id).destroy()
 
 
 class TreeRelativeDateOverlay(TreeConfidenceOverlay):
@@ -409,35 +434,32 @@ class TreeRelativeDateOverlay(TreeConfidenceOverlay):
 
     def redraw(self):
         self._job = None
-        for label in self.labels:
-            label.destroy()
-        self.labels.clear()
-        self.images.clear()
         if not self.tree.winfo_exists():
             return
 
         selected = set(self.tree.selection())
         normal_background = _appearance_color(self.colors["surface"])
         selected_background = "#203C52" if ctk.get_appearance_mode() == "Dark" else "#DDEFFC"
+        visible: set[str] = set()
         for item_id, (days, display) in self.ages.items():
             bounds = self.tree.bbox(item_id, self.column)
             if not bounds:
                 continue
+            visible.add(item_id)
             x, y, cell_width, cell_height = bounds
-            label = tk.Label(
-                self.tree,
+            label = self.labels.get(item_id)
+            if label is None:
+                label = tk.Label(self.tree, borderwidth=0, highlightthickness=0, font=("Inter", 10, "bold"), cursor="hand2")
+                label.bind("<Button-1>", lambda _event, current=item_id: self._select(current))
+                label.bind("<MouseWheel>", self._scroll)
+                self.labels[item_id] = label
+            label.configure(
                 text=display,
                 foreground=_appearance_color(count_age_color(days)),
                 background=selected_background if item_id in selected else normal_background,
-                borderwidth=0,
-                highlightthickness=0,
-                font=("Inter", 10, "bold"),
-                cursor="hand2",
             )
-            label.bind("<Button-1>", lambda _event, current=item_id: self._select(current))
-            label.bind("<MouseWheel>", self._scroll)
             label.place(x=x, y=y, width=cell_width, height=max(1, cell_height - 1))
-            self.labels.append(label)
+        self._remove_hidden(visible)
 
 
 class ConfidenceGauge(ctk.CTkFrame):

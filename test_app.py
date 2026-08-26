@@ -13,7 +13,7 @@ from cloud_sync import CloudSync, CloudSyncError, TABLES
 from premium_icons import app_icon, application_icon_path
 from PIL import Image
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
-from premium_widgets import canvas_wheel_impulse, count_age_color, stock_quantity_color, tree_wheel_units
+from premium_widgets import canvas_wheel_impulse, count_age_color, mini_confidence_gauge, stock_quantity_color, tree_wheel_units
 
 
 class InventoryDatabaseTests(unittest.TestCase):
@@ -151,6 +151,19 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertEqual(count_age_color(14)[0], "#A87500")
         self.assertEqual(count_age_color(45)[0], "#D45A32")
         self.assertEqual(count_age_color(None)[0], "#8F2433")
+
+    def test_bulk_confidence_matches_individual_calculation(self):
+        first_id = self.create_product(name="MARINHO", group="FITA 5 PEÇAS")
+        second_id = self.create_product(name="VERDE", group="FITA 4 PEÇAS")
+        self.db.add_movement(first_id, "entrada", 8, date.today().isoformat(), "Entrada", "Teste")
+        self.db.add_movement(first_id, "inventario", 6, date.today().isoformat(), "Contagem", "Teste")
+        products = self.db.products()
+        bulk = self.db.stock_confidences(products)
+
+        self.assertEqual(set(bulk), {first_id, second_id})
+        for product in products:
+            product_id = int(product["id"])
+            self.assertEqual(bulk[product_id], self.db.stock_confidence(product_id, float(product["stock"])))
 
     def test_batch_movements_keep_stock_consistent(self):
         product_id = self.create_product()
@@ -527,12 +540,71 @@ class CountFlowTests(unittest.TestCase):
         self.assertEqual(calls, ["hide", "balance", "scheduled", "focus"])
 
 
+class ResponsivenessTests(unittest.TestCase):
+    def test_ui_scheduler_keeps_only_the_latest_repeated_action(self):
+        callbacks = {}
+        cancelled = []
+        executed = []
+
+        class Screen:
+            def __init__(self):
+                self._ui_jobs = {}
+                self.next_id = 0
+
+            def after(self, _delay, callback):
+                self.next_id += 1
+                job = f"job-{self.next_id}"
+                callbacks[job] = callback
+                return job
+
+            def after_cancel(self, job):
+                cancelled.append(job)
+                callbacks.pop(job, None)
+
+        screen = Screen()
+        app.EstoqueApp.schedule_ui_task(screen, "search", lambda:executed.append("old"), 100)
+        app.EstoqueApp.schedule_ui_task(screen, "search", lambda:executed.append("new"), 100)
+        callbacks["job-2"]()
+
+        self.assertEqual(cancelled, ["job-1"])
+        self.assertEqual(executed, ["new"])
+        self.assertEqual(screen._ui_jobs, {})
+
+    def test_refresh_all_updates_only_the_visible_page(self):
+        calls = []
+
+        class Database:
+            def ensure_kit_operations(self):calls.append("database")
+
+        class Screen:
+            current_page = "count"
+            db = Database()
+
+            def refresh_products(self):calls.append("products")
+            def refresh_stock(self):calls.append("stock")
+            def refresh_movements(self):calls.append("movements")
+            def refresh_movement_page(self):calls.append("movement_page")
+            def refresh_kit_conversion(self):calls.append("kit")
+            def refresh_simulation(self):calls.append("simulation")
+            def refresh_simulation_page(self):calls.append("simulation_page")
+            def refresh_counts(self):calls.append("count")
+
+        app.EstoqueApp.refresh_all(Screen())
+        self.assertEqual(calls, ["database", "count"])
+
+
 class ScrollingTests(unittest.TestCase):
     def test_tree_wheel_moves_multiple_rows_and_canvas_keeps_fractional_impulse(self):
         self.assertEqual(tree_wheel_units(120), -3)
         self.assertEqual(tree_wheel_units(-240), 6)
         self.assertEqual(canvas_wheel_impulse(120), -84.0)
         self.assertEqual(canvas_wheel_impulse(-120), 84.0)
+
+    def test_confidence_gauge_render_is_cached(self):
+        colors = {"border": ("#DDDDDD", "#333333")}
+        first = mini_confidence_gauge(45, colors)
+        second = mini_confidence_gauge(45, colors)
+        self.assertIs(first, second)
 
 
 class SharedCloudSyncTests(unittest.TestCase):
