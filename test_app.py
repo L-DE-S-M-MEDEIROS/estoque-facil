@@ -70,6 +70,7 @@ class InventoryDatabaseTests(unittest.TestCase):
         product = self.db.product(product_id)
         self.assertTrue(app.product_matches_search(product, "mar"))
         self.assertTrue(app.product_matches_search(product, "4 pec"))
+        self.assertTrue(app.product_matches_search(product, "4 pecas marinho"))
         self.assertTrue(app.product_matches_search(product, "matern"))
         self.assertFalse(app.product_matches_search(product, "caramelo"))
 
@@ -117,6 +118,19 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.db.delete_operation(int(entry["id"]))
         self.assertNotIn("Recebimento", [row["name"] for row in self.db.operations()])
 
+    def test_internal_kit_operations_do_not_mix_with_custom_operations(self):
+        self.db.save_operation("MONTAGEM", "positive")
+        visible_names = [row["name"] for row in self.db.operations()]
+        self.assertIn("MONTAGEM", visible_names)
+        self.assertNotIn("Montagem de kits", visible_names)
+        self.assertNotIn("Desmontagem de kits", visible_names)
+
+        with self.db.db:
+            self.db.db.execute("DELETE FROM operation_types WHERE legacy_type IN ('kit_assembly','kit_disassembly')")
+        self.assertTrue(self.db.ensure_kit_operations())
+        self.assertEqual(self.db.operation("kit_assembly")["name"], "Montagem de kits")
+        self.assertEqual(self.db.operation("kit_disassembly")["name"], "Desmontagem de kits")
+
     def test_hidden_inventory_operation_still_supports_counting(self):
         product_id = self.create_product()
         inventory = self.db.operation("inventario")
@@ -144,6 +158,80 @@ class InventoryDatabaseTests(unittest.TestCase):
         batch_id = self.db.add_movement_batch("saida", [(product_id, 3)], date.today().isoformat(), "Venda", "Teste")
         self.assertGreater(batch_id, 0)
         self.assertEqual(self.db.stock(product_id), 7)
+
+    def test_kit_helpers_match_only_the_same_family_color_and_variation(self):
+        selected = {"id": 5, "group_name": "FITA 5 PEÇAS", "name": "VERDE", "variant": "LISO"}
+        products = [
+            {"id": 1, "group_name": "FITA 2 PEÇAS", "name": "VERDE", "variant": "LISO"},
+            {"id": 2, "group_name": "FITA 4 PEÇAS", "name": "VERDE", "variant": "LISO"},
+            {"id": 3, "group_name": "FITA 4 PEÇAS", "name": "MARINHO", "variant": "LISO"},
+            {"id": 4, "group_name": "CASINHA 4 PEÇAS", "name": "VERDE", "variant": "LISO"},
+            selected,
+        ]
+
+        self.assertEqual(app.kit_piece_count(selected), 5)
+        self.assertEqual(app.kit_group_family(selected), "fita")
+        self.assertEqual([row["id"] for row in app.compatible_smaller_kits(selected, products)], [1, 2])
+
+    def test_kit_assembly_moves_one_for_one_in_a_closed_batch(self):
+        source_id = self.create_product(name="VERDE", group="FITA 2 PEÇAS", variant="")
+        self.db.save_product({"name":"VERDE","category":"Bolsa maternidade","group_name":"FITA 5 PEÇAS","variant":"","unit":"un","minimum":0,"photo":"","notes":""})
+        target_id = int(self.db.db.execute("SELECT id FROM products WHERE group_name='FITA 5 PEÇAS'").fetchone()["id"])
+        self.db.add_movement(source_id, "inventario", 3, "2026-08-25", "Inicial", "Ana")
+
+        batch_id = self.db.add_kit_conversion("montagem", source_id, target_id, 1, "2026-08-26", "Pedido 20", "Ana")
+
+        self.assertEqual(self.db.stock(source_id), 2)
+        self.assertEqual(self.db.stock(target_id), 1)
+        conversion = self.db.kit_conversion_batch(batch_id)
+        self.assertEqual(conversion["mode"], "montagem")
+        self.assertEqual(float(conversion["source"]["quantity"]), -1)
+        self.assertEqual(float(conversion["target"]["quantity"]), 1)
+        history = next(row for row in self.db.movement_history() if row["history_key"] == f"batch:{batch_id}")
+        self.assertEqual(history["operation_name"], "Montagem de kits")
+        self.assertEqual(history["item_count"], 2)
+
+    def test_kit_disassembly_removes_five_piece_and_adds_two_piece(self):
+        target_id = self.create_product(name="VERDE", group="2 PEÇAS", variant="")
+        self.db.save_product({"name":"VERDE","category":"Bolsa maternidade","group_name":"5 PEÇAS","variant":"","unit":"un","minimum":0,"photo":"","notes":""})
+        source_id = int(self.db.db.execute("SELECT id FROM products WHERE group_name='5 PEÇAS'").fetchone()["id"])
+        self.db.add_movement(source_id, "inventario", 4, "2026-08-25", "Inicial", "Ana")
+
+        batch_id = self.db.add_kit_conversion("desmembramento", source_id, target_id, 1, "2026-08-26", "", "Ana")
+
+        self.assertEqual(self.db.stock(source_id), 3)
+        self.assertEqual(self.db.stock(target_id), 1)
+        self.assertEqual(self.db.kit_conversion_batch(batch_id)["mode"], "desmembramento")
+
+    def test_kit_conversion_blocks_different_color_wrong_direction_and_fraction(self):
+        lower_id = self.create_product(name="VERDE", group="2 PEÇAS", variant="")
+        self.db.save_product({"name":"MARINHO","category":"Bolsa maternidade","group_name":"5 PEÇAS","variant":"","unit":"un","minimum":0,"photo":"","notes":""})
+        higher_id = int(self.db.db.execute("SELECT id FROM products WHERE group_name='5 PEÇAS'").fetchone()["id"])
+        with self.assertRaisesRegex(ValueError, "mesma cor/variação"):
+            self.db.add_kit_conversion("montagem", lower_id, higher_id, 1, "2026-08-26", "", "Ana")
+
+        self.db.save_product({"name":"VERDE","category":"Bolsa maternidade","group_name":"5 PEÇAS","variant":"","unit":"un","minimum":0,"photo":"","notes":""})
+        green_higher_id = int(self.db.db.execute("SELECT id FROM products WHERE group_name='5 PEÇAS' AND name='VERDE'").fetchone()["id"])
+        with self.assertRaisesRegex(ValueError, "kit menor como origem"):
+            self.db.add_kit_conversion("montagem", green_higher_id, lower_id, 1, "2026-08-26", "", "Ana")
+        with self.assertRaisesRegex(ValueError, "inteiro maior que zero"):
+            self.db.add_kit_conversion("montagem", lower_id, green_higher_id, 1.5, "2026-08-26", "", "Ana")
+
+    def test_kit_conversion_can_be_edited_and_deleted_as_one_movement(self):
+        lower_id = self.create_product(name="VERDE", group="2 PEÇAS", variant="")
+        self.db.save_product({"name":"VERDE","category":"Bolsa maternidade","group_name":"4 PEÇAS","variant":"","unit":"un","minimum":0,"photo":"","notes":""})
+        higher_id = int(self.db.db.execute("SELECT id FROM products WHERE group_name='4 PEÇAS'").fetchone()["id"])
+        self.db.add_movement(lower_id, "inventario", 5, "2026-08-24", "Inicial", "Ana")
+        batch_id = self.db.add_kit_conversion("montagem", lower_id, higher_id, 1, "2026-08-25", "", "Ana")
+
+        self.db.update_kit_conversion(batch_id, "montagem", lower_id, higher_id, 2, "2026-08-26", "Revisado", "Bia")
+        self.assertEqual(self.db.stock(lower_id), 3)
+        self.assertEqual(self.db.stock(higher_id), 2)
+        self.assertEqual(self.db.movement_batch(batch_id)["performed_by"], "Bia")
+
+        self.db.delete_movement_batch(batch_id)
+        self.assertEqual(self.db.stock(lower_id), 5)
+        self.assertEqual(self.db.stock(higher_id), 0)
 
     def test_closed_movement_history_updates_and_deletes_whole_batch(self):
         first_id = self.create_product(name="MARINHO")
@@ -377,6 +465,21 @@ class LocalStateTests(unittest.TestCase):
         preferences.save()
 
         self.assertEqual(LocalPreferences(path).values["last_page"], "simulation")
+
+    def test_kit_conversion_page_and_mode_are_restored(self):
+        path = self.folder / "ui-preferences.json"
+        preferences = LocalPreferences(path)
+        preferences.values.update({
+            "last_page": "kit_conversion",
+            "kit_conversion_mode": "Desmontagem",
+            "kit_conversion_user": "Ana",
+        })
+        preferences.save()
+
+        restored = LocalPreferences(path).values
+        self.assertEqual(restored["last_page"], "kit_conversion")
+        self.assertEqual(restored["kit_conversion_mode"], "Desmontagem")
+        self.assertEqual(restored["kit_conversion_user"], "Ana")
 
     def test_movement_internal_page_is_restored(self):
         path = self.folder / "ui-preferences.json"

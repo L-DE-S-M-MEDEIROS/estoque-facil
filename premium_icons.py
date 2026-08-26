@@ -67,6 +67,13 @@ def _draw_icon(name: str, color: str, size: int = 256) -> Image.Image:
         draw.line((p(16), p(5), p(19), p(8), p(16), p(11)), **line)
         draw.line((p(20), p(16), p(5), p(16)), **line)
         draw.line((p(8), p(13), p(5), p(16), p(8), p(19)), **line)
+    elif name == "kit_conversion":
+        draw.rounded_rectangle((p(3), p(4), p(10), p(11)), radius=p(1.2), outline=color, width=width)
+        draw.rounded_rectangle((p(14), p(13), p(21), p(20)), radius=p(1.2), outline=color, width=width)
+        draw.line((p(11), p(7), p(19), p(7), p(19), p(11)), **line)
+        draw.line((p(16), p(9), p(19), p(12), p(22), p(9)), **line)
+        draw.line((p(13), p(17), p(5), p(17), p(5), p(13)), **line)
+        draw.line((p(8), p(15), p(5), p(12), p(2), p(15)), **line)
     elif name == "operation":
         draw.rounded_rectangle((p(3), p(4), p(21), p(20)), radius=p(2), outline=color, width=width)
         draw.line((p(7), p(9), p(17), p(9)), **line)

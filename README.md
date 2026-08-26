@@ -31,6 +31,8 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Aba **Cadastro** com gerenciadores separados e ilustrados para Usuários, Operações, Grupos e Produtos
 - Operações padrão e personalizadas visíveis no mesmo gerenciador, com edição e remoção segura
 - Movimentações em lote no estilo carrinho: vários produtos, uma operação, data, observação e usuário responsável
+- Aba **Montagem / Desmontagem** para converter kits de 2, 4 e 5 peças na proporção de 1 para 1; a origem perde unidades e o destino recebe unidades dentro da mesma movimentação fechada
+- Seleção inteligente que mostra somente kits menores da mesma família, cor e variação, impedindo combinações incompatíveis
 - Revisão, edição e remoção dos itens antes de salvar o conjunto
 - Soma em tempo real da quantidade total de itens informados na movimentação
 - Páginas internas separadas para **Nova movimentação** e **Histórico**, preservando o padrão visual do aplicativo

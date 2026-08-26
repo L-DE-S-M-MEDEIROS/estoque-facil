@@ -33,8 +33,14 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.1.17"
+APP_VERSION = "1.2.0"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
+
+KIT_PIECE_COUNTS = (2, 4, 5)
+KIT_INTERNAL_OPERATIONS = {
+    "montagem": "kit_assembly",
+    "desmembramento": "kit_disassembly",
+}
 
 COLORS = {
     "background": ("#F6F7F9", "#0B0F16"),
@@ -176,7 +182,9 @@ def product_matches_search(product: sqlite3.Row, query: str) -> bool:
         str(product[field] or "")
         for field in ("name", "group_name", "variant", "category")
     )
-    return needle in normalize_search_text(searchable)
+    haystack = normalize_search_text(searchable)
+    tokens = re.findall(r"[a-z0-9]+", needle)
+    return needle in haystack or (bool(tokens) and all(token in haystack for token in tokens))
 
 
 def relative_past_date(value: str, today: date | None = None) -> str:
@@ -205,6 +213,53 @@ def relative_past_date(value: str, today: date | None = None) -> str:
 def product_label(product: sqlite3.Row) -> str:
     parts = [product["group_name"], product["name"], product["variant"]]
     return " • ".join(str(part) for part in parts if part)
+
+
+def kit_piece_count(product_or_group: sqlite3.Row | dict | str) -> int | None:
+    """Return the supported kit size encoded in a product group."""
+    if isinstance(product_or_group, str):
+        group_name = product_or_group
+    else:
+        group_name = str(product_or_group["group_name"] or "")
+    match = re.search(r"\b(2|4|5)\s*pecas\b", normalize_identity_text(group_name))
+    return int(match.group(1)) if match else None
+
+
+def kit_group_family(product_or_group: sqlite3.Row | dict | str) -> str:
+    """Normalize the portion of a kit group that is not its piece count."""
+    if isinstance(product_or_group, str):
+        group_name = product_or_group
+    else:
+        group_name = str(product_or_group["group_name"] or "")
+    normalized = normalize_identity_text(group_name)
+    without_size = re.sub(r"\b(?:2|4|5)\s*pecas\b", " ", normalized)
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", without_size).split())
+
+
+def kit_variation_key(product: sqlite3.Row | dict) -> tuple[str, str, str]:
+    """Identify the exact color/variation that must be preserved in a conversion."""
+    return (
+        kit_group_family(product),
+        normalize_identity_text(product["name"]),
+        normalize_identity_text(product["variant"]),
+    )
+
+
+def compatible_smaller_kits(selected: sqlite3.Row | dict, products) -> list:
+    """List only smaller supported kits from the exact same family and variation."""
+    selected_count = kit_piece_count(selected)
+    if selected_count not in (4, 5):
+        return []
+    identity = kit_variation_key(selected)
+    matches = [
+        product
+        for product in products
+        if int(product["id"]) != int(selected["id"])
+        and kit_piece_count(product) in KIT_PIECE_COUNTS
+        and kit_piece_count(product) < selected_count
+        and kit_variation_key(product) == identity
+    ]
+    return sorted(matches, key=lambda product: (kit_piece_count(product), product_label(product)))
 
 
 def simulated_stock(current_stock: float, quantity: float, operation: str) -> float:
@@ -439,12 +494,16 @@ class Database:
             ("Saída", "negative", "saida"),
             ("Ajuste", "set", "ajuste"),
             ("Inventário", "set", "inventario"),
+            ("Montagem de kits", "negative", KIT_INTERNAL_OPERATIONS["montagem"]),
+            ("Desmontagem de kits", "negative", KIT_INTERNAL_OPERATIONS["desmembramento"]),
         ):
             self.db.execute("""INSERT OR IGNORE INTO operation_types(name,effect,legacy_type,active,protected,created_at)
                 VALUES(?,?,?,1,1,?)""", (name, effect, legacy_type, created_at))
         self.db.execute("""UPDATE movements SET operation_id=(
             SELECT id FROM operation_types WHERE legacy_type=movements.type
         ) WHERE operation_id IS NULL""")
+        self.db.execute("""UPDATE OR IGNORE operation_types SET name='Desmontagem de kits'
+            WHERE legacy_type='kit_disassembly' AND name<>'Desmontagem de kits'""")
         self.db.commit()
         self.on_change = None
         self.db.set_trace_callback(self._track_change)
@@ -453,8 +512,36 @@ class Database:
         if self.on_change and re.match(r"^\s*(INSERT|UPDATE|DELETE)\b", statement, re.IGNORECASE):
             self.on_change()
 
-    def operations(self, include_inactive: bool = False, custom_only: bool = False) -> list[sqlite3.Row]:
-        conditions = []
+    def ensure_kit_operations(self) -> bool:
+        """Restore internal conversion operations after importing an older cloud snapshot."""
+        existing = {
+            str(row["legacy_type"])
+            for row in self.db.execute("SELECT legacy_type FROM operation_types WHERE legacy_type IN ('kit_assembly','kit_disassembly')")
+        }
+        missing = [
+            ("Montagem de kits", "negative", KIT_INTERNAL_OPERATIONS["montagem"]),
+            ("Desmontagem de kits", "negative", KIT_INTERNAL_OPERATIONS["desmembramento"]),
+        ]
+        missing = [definition for definition in missing if definition[2] not in existing]
+        disassembly = self.operation(KIT_INTERNAL_OPERATIONS["desmembramento"])
+        can_rename = bool(
+            disassembly
+            and disassembly["name"] != "Desmontagem de kits"
+            and not self.db.execute("SELECT 1 FROM operation_types WHERE name='Desmontagem de kits' COLLATE NOCASE").fetchone()
+        )
+        if not missing and not can_rename:
+            return False
+        created_at = datetime.now().isoformat(timespec="seconds")
+        with self.db:
+            if missing:
+                self.db.executemany("""INSERT INTO operation_types(name,effect,legacy_type,active,protected,created_at)
+                    VALUES(?,?,?,1,1,?)""", ((name, effect, legacy_type, created_at) for name, effect, legacy_type in missing))
+            if can_rename:
+                self.db.execute("UPDATE operation_types SET name='Desmontagem de kits' WHERE legacy_type='kit_disassembly'")
+        return True
+
+    def operations(self, include_inactive: bool = False, custom_only: bool = False, include_internal: bool = False) -> list[sqlite3.Row]:
+        conditions = [] if include_internal else ["COALESCE(legacy_type,'') NOT IN ('kit_assembly','kit_disassembly')"]
         if not include_inactive:
             conditions.append("active=1")
         if custom_only:
@@ -820,6 +907,170 @@ class Database:
     def add_movement(self, product_id: int, operation: int | str, informed: float, movement_date: str, reason: str, checked_by: str = "") -> None:
         responsible = checked_by.strip() or "Contagem"
         self.add_movement_batch(operation, [(product_id, informed)], movement_date, reason, responsible)
+
+    def _validate_kit_conversion(
+        self,
+        mode: str,
+        source_product_id: int,
+        target_product_id: int,
+        quantity: float,
+    ) -> tuple[sqlite3.Row, sqlite3.Row, float, sqlite3.Row]:
+        if mode not in KIT_INTERNAL_OPERATIONS:
+            raise ValueError("Escolha Montagem ou Desmontagem.")
+        source = self.product(int(source_product_id))
+        target = self.product(int(target_product_id))
+        if not source or not target:
+            raise ValueError("Um dos kits selecionados não existe mais.")
+        if int(source["id"]) == int(target["id"]):
+            raise ValueError("O kit de origem e o kit de destino devem ser diferentes.")
+        amount = float(quantity)
+        if not math.isfinite(amount) or amount <= 0 or not amount.is_integer():
+            raise ValueError("A quantidade deve ser um número inteiro maior que zero.")
+
+        source_count = kit_piece_count(source)
+        target_count = kit_piece_count(target)
+        if source_count not in KIT_PIECE_COUNTS or target_count not in KIT_PIECE_COUNTS:
+            raise ValueError("Use somente produtos dos grupos de 2, 4 ou 5 peças.")
+        if kit_variation_key(source) != kit_variation_key(target):
+            raise ValueError("A origem e o destino precisam ser exatamente da mesma cor/variação.")
+        if str(source["unit"]) != str(target["unit"]):
+            raise ValueError("Os kits de origem e destino precisam usar a mesma unidade.")
+        if mode == "montagem" and not source_count < target_count:
+            raise ValueError("Na montagem, use um kit menor como origem e um kit maior como destino.")
+        if mode == "desmembramento" and not source_count > target_count:
+            raise ValueError("Na desmontagem, use um kit maior como origem e um kit menor como destino.")
+
+        operation = self.operation(KIT_INTERNAL_OPERATIONS[mode])
+        if not operation:
+            raise ValueError("A operação interna dessa conversão não foi encontrada.")
+        return source, target, amount, operation
+
+    @staticmethod
+    def _kit_conversion_reason(mode: str, source: sqlite3.Row, target: sqlite3.Row, note: str) -> str:
+        title = "Montagem" if mode == "montagem" else "Desmontagem"
+        route = f"{title}: {product_label(source)} → {product_label(target)}"
+        clean_note = " ".join(note.strip().split())
+        return f"{route} — {clean_note}" if clean_note else route
+
+    def _insert_kit_conversion_items(
+        self,
+        batch_id: int,
+        operation_id: int,
+        source: sqlite3.Row,
+        target: sqlite3.Row,
+        amount: float,
+        movement_date: str,
+        reason: str,
+        responsible: str,
+        created_at: str,
+    ) -> set[int]:
+        affected: set[int] = set()
+        for index, (product, kind, delta) in enumerate((
+            (source, "saida", -amount),
+            (target, "entrada", amount),
+        )):
+            product_id = int(product["id"])
+            affected.add(product_id)
+            item_created_at = f"{created_at}-{index:04d}"
+            balance_before = self._balance_before(product_id, movement_date, item_created_at, 2**63 - 1)
+            self.db.execute("""INSERT INTO movements(product_id,type,quantity,resulting_stock,informed_quantity,movement_date,reason,checked_by,created_at,operation_id,batch_id)
+                VALUES(?,?,?,?,NULL,?,?,?,?,?,?)""", (
+                product_id, kind, delta, balance_before + delta, movement_date,
+                reason, responsible, item_created_at, operation_id, batch_id,
+            ))
+        return affected
+
+    def add_kit_conversion(
+        self,
+        mode: str,
+        source_product_id: int,
+        target_product_id: int,
+        quantity: float,
+        movement_date: str,
+        note: str,
+        performed_by: str,
+    ) -> int:
+        source, target, amount, operation = self._validate_kit_conversion(
+            mode, source_product_id, target_product_id, quantity
+        )
+        responsible = " ".join(performed_by.strip().split())
+        if not responsible:
+            raise ValueError("Informe o usuário responsável pela conversão.")
+        try:
+            datetime.strptime(movement_date, "%Y-%m-%d")
+        except ValueError as error:
+            raise ValueError("Informe uma data válida.") from error
+        reason = self._kit_conversion_reason(mode, source, target, note)
+        created_at = datetime.now().isoformat(timespec="microseconds")
+        with self.db:
+            cursor = self.db.execute("""INSERT INTO movement_batches(operation_id,movement_date,reason,performed_by,created_at)
+                VALUES(?,?,?,?,?)""", (operation["id"], movement_date, reason, responsible, created_at))
+            batch_id = int(cursor.lastrowid)
+            affected = self._insert_kit_conversion_items(
+                batch_id, int(operation["id"]), source, target, amount,
+                movement_date, reason, responsible, created_at,
+            )
+            for product_id in affected:
+                self._recalculate_product(product_id)
+        return batch_id
+
+    def kit_conversion_batch(self, batch_id: int) -> dict | None:
+        batch = self.movement_batch(batch_id)
+        if not batch or batch["legacy_type"] not in KIT_INTERNAL_OPERATIONS.values():
+            return None
+        items = self.movement_batch_items(batch_id)
+        source = next((item for item in items if float(item["quantity"]) < 0), None)
+        target = next((item for item in items if float(item["quantity"]) > 0), None)
+        if not source or not target:
+            return None
+        mode = "montagem" if batch["legacy_type"] == KIT_INTERNAL_OPERATIONS["montagem"] else "desmembramento"
+        return {
+            "batch": batch,
+            "mode": mode,
+            "source": source,
+            "target": target,
+            "quantity": abs(float(source["quantity"])),
+        }
+
+    def update_kit_conversion(
+        self,
+        batch_id: int,
+        mode: str,
+        source_product_id: int,
+        target_product_id: int,
+        quantity: float,
+        movement_date: str,
+        note: str,
+        performed_by: str,
+    ) -> None:
+        current = self.kit_conversion_batch(batch_id)
+        if not current:
+            raise ValueError("Essa montagem ou desmontagem não existe mais.")
+        source, target, amount, operation = self._validate_kit_conversion(
+            mode, source_product_id, target_product_id, quantity
+        )
+        responsible = " ".join(performed_by.strip().split())
+        if not responsible:
+            raise ValueError("Informe o usuário responsável pela conversão.")
+        try:
+            datetime.strptime(movement_date, "%Y-%m-%d")
+        except ValueError as error:
+            raise ValueError("Informe uma data válida.") from error
+        reason = self._kit_conversion_reason(mode, source, target, note)
+        batch = current["batch"]
+        previous_items = self.movement_batch_items(batch_id)
+        affected = {int(item["product_id"]) for item in previous_items}
+        with self.db:
+            self.db.execute("DELETE FROM movements WHERE batch_id=?", (batch_id,))
+            self.db.execute("""UPDATE movement_batches SET operation_id=?,movement_date=?,reason=?,performed_by=? WHERE id=?""", (
+                operation["id"], movement_date, reason, responsible, batch_id,
+            ))
+            affected.update(self._insert_kit_conversion_items(
+                batch_id, int(operation["id"]), source, target, amount,
+                movement_date, reason, responsible, str(batch["created_at"]),
+            ))
+            for product_id in affected:
+                self._recalculate_product(product_id)
 
     def stock_confidence(self, product_id: int, current_stock: float | None = None, as_of: date | None = None) -> dict:
         """Estimate balance reliability from age and activity since the last physical count."""
@@ -1685,7 +1936,7 @@ class EstoqueApp(ctk.CTk):
         self._last_window_state = self.settings.get("window_state", "zoomed") if self.settings.get("window_state") in ("normal", "zoomed") else "zoomed"
         apply_window_icon(self); self.protocol("WM_DELETE_WINDOW", self.close)
         self.brand_icon = brand_mark(86)
-        self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "simulation", "count", "settings", "registration", "user", "operation", "group", "plus", "search", "edit", "trash", "download", "upload", "refresh", "print", "collapse", "expand")}
+        self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "kit_conversion", "simulation", "count", "settings", "registration", "user", "operation", "group", "plus", "search", "edit", "trash", "download", "upload", "refresh", "print", "collapse", "expand")}
         self.table_separators: list[TreeRowSeparatorOverlay] = []
         self.update_events: queue.Queue = queue.Queue(); self.update_busy = False; self.update_button = None
         self.cloud_events: queue.Queue = queue.Queue(); self.cloud_sync_busy = False; self.cloud_sync_pending = False; self.cloud_sync_timer = None
@@ -1708,6 +1959,8 @@ class EstoqueApp(ctk.CTk):
         if hasattr(self,"count_product_suggestions_collapsed"):self.settings["count_products_expanded"] = not self.count_product_suggestions_collapsed
         if hasattr(self,"m_operation"):self.settings["movement_operation"] = self.m_operation.get()
         if hasattr(self,"m_user"):self.settings["movement_user"] = self.m_user.get()
+        if hasattr(self,"kit_mode"):self.settings["kit_conversion_mode"] = self.kit_mode.get()
+        if hasattr(self,"kit_user"):self.settings["kit_conversion_user"] = self.kit_user.get()
         if hasattr(self,"history_filter"):self.settings["history_filter"] = self.history_filter.get()
         if hasattr(self,"product_suggestions_collapsed"):self.settings["movement_products_expanded"] = not self.product_suggestions_collapsed
 
@@ -1741,8 +1994,9 @@ class EstoqueApp(ctk.CTk):
         brand = ctk.CTkFrame(logo, fg_color="transparent"); brand.pack(side="left", padx=13)
         ctk.CTkLabel(brand, text="ESTOQUE", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 16, "bold")).pack(anchor="w")
         ctk.CTkLabel(brand, text="BOLSAS BABY", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10, "bold")).pack(anchor="w", pady=(2,0))
-        for key, label in (("stock","Estoque atual"),("movements","Movimentações"),("simulation","Simulação"),("count","Contagem"),("registration","Cadastro"),("settings","Configurações")):
-            button = ctk.CTkButton(self.sidebar, text=label, image=self.icons[key], compound="left", anchor="w", height=48, corner_radius=10, fg_color="transparent", hover_color=COLORS["surface_hover"], text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 13, "bold"), command=lambda k=key:self.show_page(k))
+        for key, label in (("stock","Estoque atual"),("movements","Movimentações"),("kit_conversion","Montagem / Desmontagem"),("simulation","Simulação"),("count","Contagem"),("registration","Cadastro"),("settings","Configurações")):
+            font_size = 11 if key == "kit_conversion" else 13
+            button = ctk.CTkButton(self.sidebar, text=label, image=self.icons[key], compound="left", anchor="w", height=48, corner_radius=10, fg_color="transparent", hover_color=COLORS["surface_hover"], text_color=COLORS["muted"], font=ctk.CTkFont("Inter", font_size, "bold"), command=lambda k=key:self.show_page(k))
             button.pack(fill="x", padx=16, pady=4); self.nav_buttons[key]=button
         self.sidebar_status=ctk.CTkLabel(self.sidebar, text=f"●  Local + nuvem segura\n    Versão {APP_VERSION}", justify="left", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10));self.sidebar_status.pack(side="bottom", anchor="w", padx=26, pady=28)
         self.content = ctk.CTkFrame(self, fg_color=COLORS["background"], corner_radius=0); self.content.grid(row=0,column=1,sticky="nsew"); self.content.grid_columnconfigure(0,weight=1); self.content.grid_rowconfigure(0,weight=1)
@@ -1750,7 +2004,7 @@ class EstoqueApp(ctk.CTk):
     def show_page(self,key):
         self.capture_interface_preferences()
         for page in self.pages.values(): page.grid_remove()
-        if key not in self.pages: self.pages[key]={"registration":self.registration_page,"stock":self.stock_page,"movements":self.movements_page,"simulation":self.simulation_page,"count":self.count_page,"settings":self.settings_page}[key]()
+        if key not in self.pages: self.pages[key]={"registration":self.registration_page,"stock":self.stock_page,"movements":self.movements_page,"kit_conversion":self.kit_conversion_page,"simulation":self.simulation_page,"count":self.count_page,"settings":self.settings_page}[key]()
         self.pages[key].grid(row=0,column=0,sticky="nsew",padx=32,pady=28)
         self.current_page=key;self.settings["last_page"]=key;self.save_settings()
         for name,button in self.nav_buttons.items():
@@ -1761,7 +2015,7 @@ class EstoqueApp(ctk.CTk):
                 border_width=1 if selected else 0,
                 border_color=COLORS["accent"] if selected else COLORS["sidebar"],
             )
-        {"registration":lambda:None,"stock":self.refresh_stock,"movements":self.refresh_movements,"simulation":self.refresh_simulation,"count":self.refresh_counts,"settings":lambda:None}[key]()
+        {"registration":lambda:None,"stock":self.refresh_stock,"movements":self.refresh_movements,"kit_conversion":self.refresh_kit_conversion,"simulation":self.refresh_simulation,"count":self.refresh_counts,"settings":lambda:None}[key]()
 
     def table(self,parent,columns,headings,widths):
         tree=ttk.Treeview(parent,columns=columns,show="headings",selectmode="browse")
@@ -2188,6 +2442,303 @@ class EstoqueApp(ctk.CTk):
         for label,text in zip(self.count_cards,(str(pending),str(counted_today),str(differences_today),f"{average}%"),strict=True):label.configure(text=text)
         if not self.count_product_suggestions_collapsed:self.show_count_product_suggestions()
 
+    def kit_conversion_page(self):
+        page = SmoothScrollableFrame(
+            self.content, fg_color="transparent", corner_radius=0,
+            scrollbar_button_color=COLORS["accent"],
+            scrollbar_button_hover_color=COLORS["accent_hover"],
+        )
+        PageTitle(
+            page,
+            "Montagem / Desmontagem",
+            "Transforme kits da mesma cor e registre automaticamente a saída da origem e a entrada do destino.",
+        ).pack(fill="x", pady=(0, 20))
+
+        saved_mode = self.settings.get("kit_conversion_mode", "Montagem")
+        self.kit_mode = tk.StringVar(value="Desmontagem" if saved_mode in ("Desmontagem", "Desmembramento") else "Montagem")
+        self.kit_product_search = tk.StringVar()
+        self.kit_quantity = tk.StringVar(value="1")
+        self.kit_user = tk.StringVar(value=self.settings.get("kit_conversion_user", ""))
+        self.kit_note = tk.StringVar()
+        self.kit_primary_product_id: int | None = None
+        self.kit_secondary_mapping: dict[str, int] = {}
+        self.kit_editing_batch_id: int | None = None
+
+        mode_card = Card(page); mode_card.pack(fill="x", pady=(0, 16))
+        mode_row = ctk.CTkFrame(mode_card, fg_color="transparent"); mode_row.pack(fill="x", padx=22, pady=18)
+        mode_text = ctk.CTkFrame(mode_row, fg_color="transparent"); mode_text.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(mode_text, text="O que você deseja fazer?", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 16, "bold")).pack(anchor="w")
+        ctk.CTkLabel(mode_text, text="A direção da conversão define automaticamente qual kit sai e qual kit entra.", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10)).pack(anchor="w", pady=(4, 0))
+        self.kit_mode_selector = ctk.CTkSegmentedButton(
+            mode_row, variable=self.kit_mode, values=["Montagem", "Desmontagem"],
+            width=330, height=42, corner_radius=9, selected_color=COLORS["accent"],
+            selected_hover_color=COLORS["accent_hover"], command=self.on_kit_mode_change,
+        )
+        self.kit_mode_selector.pack(side="right", padx=(18, 0)); self.kit_mode_selector.set(self.kit_mode.get())
+
+        composer = Card(page); composer.pack(fill="x", pady=(0, 16)); composer.grid_columnconfigure((0, 1), weight=1)
+        primary = ctk.CTkFrame(composer, fg_color="transparent"); primary.grid(row=0, column=0, sticky="nsew", padx=(22, 14), pady=20)
+        secondary = ctk.CTkFrame(composer, fg_color="transparent"); secondary.grid(row=0, column=1, sticky="nsew", padx=(14, 22), pady=20)
+
+        self.kit_primary_title = ctk.CTkLabel(primary, text="", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 15, "bold"))
+        self.kit_primary_title.pack(anchor="w")
+        self.kit_primary_help = ctk.CTkLabel(primary, text="", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10))
+        self.kit_primary_help.pack(anchor="w", pady=(4, 10))
+        search_box = ctk.CTkFrame(primary, height=42, corner_radius=9, fg_color=COLORS["surface"], border_width=2, border_color=COLORS["accent"])
+        search_box.pack(fill="x"); search_box.grid_columnconfigure(1, weight=1); search_box.grid_propagate(False)
+        ctk.CTkLabel(search_box, text="", image=self.icons["search"], width=42).grid(row=0, column=0, sticky="nsew", padx=(8, 2), pady=4)
+        self.kit_product_entry = ctk.CTkEntry(
+            search_box, textvariable=self.kit_product_search,
+            placeholder_text="Buscar cor, variação ou grupo...", height=34,
+            corner_radius=0, border_width=0, fg_color="transparent",
+        )
+        self.kit_product_entry.grid(row=0, column=1, sticky="nsew", padx=(0, 6), pady=3)
+        self.kit_product_entry.bind("<KeyRelease>", lambda _event:self.show_kit_product_suggestions())
+        self.kit_product_entry.bind("<FocusIn>", lambda _event:self.show_kit_product_suggestions())
+        self.kit_product_entry.bind("<Return>", lambda _event:self.select_first_kit_product())
+        self.kit_primary_suggestions = SmoothScrollableFrame(
+            primary, height=180, corner_radius=9, fg_color=COLORS["surface_alt"],
+            border_width=1, border_color=COLORS["border"],
+            scrollbar_button_color=COLORS["accent"], scrollbar_button_hover_color=COLORS["accent_hover"],
+        )
+        self.kit_primary_suggestions.pack(fill="x", pady=(10, 0))
+
+        self.kit_secondary_title = ctk.CTkLabel(secondary, text="", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 15, "bold"))
+        self.kit_secondary_title.pack(anchor="w")
+        self.kit_secondary_help = ctk.CTkLabel(secondary, text="", wraplength=520, justify="left", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10))
+        self.kit_secondary_help.pack(anchor="w", pady=(4, 10))
+        self.kit_secondary = tk.StringVar(value="Selecione primeiro o kit acima")
+        self.kit_secondary_menu = ctk.CTkOptionMenu(
+            secondary, variable=self.kit_secondary, values=[self.kit_secondary.get()], height=42,
+            corner_radius=9, fg_color=COLORS["surface"], button_color=COLORS["surface_alt"],
+            button_hover_color=COLORS["surface_hover"], text_color=COLORS["text"],
+            dropdown_fg_color=COLORS["surface"], dropdown_hover_color=COLORS["accent_soft"],
+            command=lambda _value:self.update_kit_preview(),
+        )
+        self.kit_secondary_menu.pack(fill="x")
+        self.kit_match_status = ctk.CTkLabel(
+            secondary, text="Escolha um kit para ver somente as opções da mesma cor.",
+            wraplength=520, justify="left", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10),
+        )
+        self.kit_match_status.pack(anchor="w", pady=(12, 0))
+
+        details = ctk.CTkFrame(composer, fg_color="transparent"); details.grid(row=1, column=0, columnspan=2, sticky="ew", padx=22, pady=(0, 20))
+        details.grid_columnconfigure((0, 1, 2), weight=1)
+        for column, text_value in enumerate(("Quantidade de kits", "Data (DD/MM/AA)", "Usuário responsável")):
+            ctk.CTkLabel(details, text=text_value, text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10, "bold")).grid(row=0, column=column, sticky="w", padx=(0 if column == 0 else 8, 8 if column < 2 else 0), pady=(0, 6))
+        self.kit_quantity_entry = ctk.CTkEntry(details, textvariable=self.kit_quantity, height=42, corner_radius=9, border_color=COLORS["border"], fg_color=COLORS["surface"])
+        self.kit_quantity_entry.grid(row=1, column=0, sticky="ew", padx=(0, 8)); self.kit_quantity.trace_add("write", lambda *_args:self.update_kit_preview())
+        self.kit_date_entry = MaskedDateEntry(details, COLORS, initial=date.today()); self.kit_date_entry.grid(row=1, column=1, sticky="ew", padx=8)
+        self.kit_user_menu = ctk.CTkOptionMenu(details, variable=self.kit_user, values=["Cadastre um usuário"], height=42, corner_radius=9, fg_color=COLORS["surface"], button_color=COLORS["surface_alt"], button_hover_color=COLORS["surface_hover"], text_color=COLORS["text"], dropdown_fg_color=COLORS["surface"], dropdown_hover_color=COLORS["accent_soft"], command=lambda _value:self.save_interface_state())
+        self.kit_user_menu.grid(row=1, column=2, sticky="ew", padx=(8, 0))
+        ctk.CTkLabel(details, text="Observação opcional", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10, "bold")).grid(row=2, column=0, columnspan=3, sticky="w", pady=(14, 6))
+        ctk.CTkEntry(details, textvariable=self.kit_note, height=42, corner_radius=9, border_color=COLORS["border"], fg_color=COLORS["surface"], placeholder_text="Ex.: montagem para completar um pedido").grid(row=3, column=0, columnspan=3, sticky="ew")
+
+        preview = Card(page); preview.pack(fill="x", pady=(0, 16))
+        preview_header = ctk.CTkFrame(preview, fg_color="transparent"); preview_header.pack(fill="x", padx=22, pady=(18, 12))
+        self.kit_preview_title = ctk.CTkLabel(preview_header, text="Prévia da conversão", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 16, "bold")); self.kit_preview_title.pack(side="left")
+        self.kit_preview_badge = ctk.CTkLabel(preview_header, text="AGUARDANDO SELEÇÃO", fg_color=COLORS["surface_alt"], corner_radius=8, text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 9, "bold"), padx=12, pady=6); self.kit_preview_badge.pack(side="right")
+        preview_grid = ctk.CTkFrame(preview, fg_color="transparent"); preview_grid.pack(fill="x", padx=22, pady=(0, 18)); preview_grid.grid_columnconfigure((0, 2), weight=1)
+        self.kit_source_card = ctk.CTkFrame(preview_grid, fg_color=COLORS["surface_alt"], corner_radius=10, border_width=1, border_color=COLORS["border"]); self.kit_source_card.grid(row=0, column=0, sticky="nsew")
+        self.kit_source_name = ctk.CTkLabel(self.kit_source_card, text="Kit de origem", wraplength=460, justify="center", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 13, "bold")); self.kit_source_name.pack(padx=16, pady=(16, 5))
+        self.kit_source_change = ctk.CTkLabel(self.kit_source_card, text="−", text_color=COLORS["danger"], font=ctk.CTkFont("Inter", 20, "bold")); self.kit_source_change.pack()
+        self.kit_source_balance = ctk.CTkLabel(self.kit_source_card, text="Saldo atual → saldo projetado", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10)); self.kit_source_balance.pack(padx=16, pady=(4, 16))
+        ctk.CTkLabel(preview_grid, text="→", text_color=COLORS["accent"], font=ctk.CTkFont("Inter", 27, "bold"), width=70).grid(row=0, column=1, padx=10)
+        self.kit_target_card = ctk.CTkFrame(preview_grid, fg_color=COLORS["surface_alt"], corner_radius=10, border_width=1, border_color=COLORS["border"]); self.kit_target_card.grid(row=0, column=2, sticky="nsew")
+        self.kit_target_name = ctk.CTkLabel(self.kit_target_card, text="Kit de destino", wraplength=460, justify="center", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 13, "bold")); self.kit_target_name.pack(padx=16, pady=(16, 5))
+        self.kit_target_change = ctk.CTkLabel(self.kit_target_card, text="+", text_color=COLORS["success"], font=ctk.CTkFont("Inter", 20, "bold")); self.kit_target_change.pack()
+        self.kit_target_balance = ctk.CTkLabel(self.kit_target_card, text="Saldo atual → saldo projetado", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10)); self.kit_target_balance.pack(padx=16, pady=(4, 16))
+
+        actions = ctk.CTkFrame(page, fg_color="transparent"); actions.pack(fill="x", pady=(0, 20))
+        self.kit_cancel_edit_button = ctk.CTkButton(actions, text="Cancelar edição", width=140, height=42, fg_color=COLORS["surface_alt"], hover_color=COLORS["surface_hover"], text_color=COLORS["text"], command=self.cancel_kit_conversion_edit)
+        self.kit_save_button = ctk.CTkButton(actions, text="Confirmar montagem", image=self.icons["kit_conversion"], width=210, height=44, corner_radius=10, fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], state="disabled", command=self.register_kit_conversion)
+        self.kit_save_button.pack(side="right")
+        ctk.CTkLabel(actions, text="A confirmação cria uma única movimentação com duas alterações vinculadas.", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10)).pack(side="left")
+
+        self.on_kit_mode_change(self.kit_mode.get())
+        self.refresh_kit_conversion()
+        return page
+
+    def kit_mode_key(self) -> str:
+        return "desmembramento" if self.kit_mode.get() == "Desmontagem" else "montagem"
+
+    def kit_primary_products(self, query: str = "") -> list[sqlite3.Row]:
+        return [
+            product for product in self.db.products()
+            if kit_piece_count(product) in (4, 5) and product_matches_search(product, query)
+        ]
+
+    def show_kit_product_suggestions(self):
+        if not hasattr(self, "kit_primary_suggestions"):
+            return
+        for child in self.kit_primary_suggestions.winfo_children(): child.destroy()
+        products = self.kit_primary_products(self.kit_product_search.get())
+        if not products:
+            ctk.CTkLabel(self.kit_primary_suggestions, text="Nenhum kit de 4 ou 5 peças encontrado", height=38, text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10)).pack(fill="x", padx=10, pady=5)
+            return
+        for product in products:
+            selected = int(product["id"]) == self.kit_primary_product_id
+            label = f"{product_label(product)}    •    Saldo: {fmt_number(product['stock'])} {product['unit']}"
+            ctk.CTkButton(
+                self.kit_primary_suggestions, text=label, anchor="w", height=38,
+                corner_radius=7, fg_color=COLORS["nav_selected"] if selected else "transparent",
+                hover_color=COLORS["surface_hover"], text_color=COLORS["accent"] if selected else COLORS["text"],
+                font=ctk.CTkFont("Inter", 10, "bold" if selected else "normal"),
+                command=lambda product_id=int(product["id"]):self.select_kit_primary_product(product_id),
+            ).pack(fill="x", padx=5, pady=2)
+
+    def select_first_kit_product(self):
+        products = self.kit_primary_products(self.kit_product_search.get())
+        if products:self.select_kit_primary_product(int(products[0]["id"]))
+
+    def select_kit_primary_product(self, product_id: int):
+        product = self.db.product(int(product_id))
+        if not product or kit_piece_count(product) not in (4, 5):
+            return
+        self.kit_primary_product_id = int(product_id)
+        self.kit_product_search.set(product_label(product))
+        self.refresh_kit_secondary_options()
+        self.show_kit_product_suggestions()
+        self.update_kit_preview()
+
+    def refresh_kit_secondary_options(self, selected_product_id: int | None = None):
+        primary = self.db.product(self.kit_primary_product_id) if self.kit_primary_product_id else None
+        matches = compatible_smaller_kits(primary, self.db.products()) if primary else []
+        self.kit_secondary_mapping = {
+            f"{product_label(product)}  •  Saldo: {fmt_number(product['stock'])} {product['unit']}": int(product["id"])
+            for product in matches
+        }
+        values = list(self.kit_secondary_mapping)
+        selected_label = next((label for label, product_id in self.kit_secondary_mapping.items() if product_id == selected_product_id), None)
+        if not values:
+            placeholder = "Nenhum kit menor da mesma cor cadastrado" if primary else "Selecione primeiro o kit de 4 ou 5 peças"
+            self.kit_secondary_mapping = {}
+            values = [placeholder]; selected_label = placeholder
+        self.kit_secondary_menu.configure(values=values)
+        self.kit_secondary.set(selected_label or values[0])
+        if primary and matches:
+            sizes = " ou ".join(str(kit_piece_count(product)) for product in matches)
+            self.kit_match_status.configure(text=f"Correspondência exata: mesma família e mesma cor/variação. Disponível em {sizes} peças.", text_color=COLORS["success"])
+        elif primary:
+            self.kit_match_status.configure(text="Não existe um kit menor cadastrado com exatamente a mesma cor/variação.", text_color=COLORS["danger"])
+        else:
+            self.kit_match_status.configure(text="Escolha um kit para ver somente as opções da mesma cor.", text_color=COLORS["muted"])
+
+    def selected_kit_conversion_products(self) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
+        primary = self.db.product(self.kit_primary_product_id) if self.kit_primary_product_id else None
+        secondary_id = self.kit_secondary_mapping.get(self.kit_secondary.get())
+        secondary = self.db.product(secondary_id) if secondary_id else None
+        if self.kit_mode_key() == "montagem":
+            return secondary, primary
+        return primary, secondary
+
+    def on_kit_mode_change(self, _value=None):
+        if not hasattr(self, "kit_primary_title"):
+            return
+        montage = self.kit_mode_key() == "montagem"
+        self.kit_primary_title.configure(text="1. Qual kit você deseja montar?" if montage else "1. Qual kit será desmontado?")
+        self.kit_primary_help.configure(text="Escolha um kit final de 4 ou 5 peças." if montage else "Escolha o kit de origem de 4 ou 5 peças.")
+        self.kit_secondary_title.configure(text="2. Qual kit foi usado como base?" if montage else "2. Em qual kit menor ele foi transformado?")
+        self.kit_secondary_help.configure(text="A lista mostra somente kits menores da mesma cor/variação." if montage else "Escolha o resultado de 2 ou 4 peças da mesma cor/variação.")
+        self.kit_save_button.configure(text="Atualizar montagem" if montage and self.kit_editing_batch_id else "Confirmar montagem" if montage else "Atualizar desmontagem" if self.kit_editing_batch_id else "Confirmar desmontagem")
+        self.refresh_kit_secondary_options()
+        self.show_kit_product_suggestions()
+        self.update_kit_preview()
+        self.save_interface_state()
+
+    def update_kit_preview(self):
+        if not hasattr(self, "kit_preview_badge"):
+            return
+        source, target = self.selected_kit_conversion_products()
+        try: amount = float(self.kit_quantity.get().replace(",", "."))
+        except ValueError: amount = 0
+        valid_amount = amount > 0 and math.isfinite(amount) and amount.is_integer()
+        if not source or not target or not valid_amount:
+            self.kit_preview_badge.configure(text="AGUARDANDO SELEÇÃO", fg_color=COLORS["surface_alt"], text_color=COLORS["muted"])
+            self.kit_source_name.configure(text="Kit de origem"); self.kit_source_change.configure(text="−")
+            self.kit_source_balance.configure(text="Saldo atual → saldo projetado")
+            self.kit_target_name.configure(text="Kit de destino"); self.kit_target_change.configure(text="+")
+            self.kit_target_balance.configure(text="Saldo atual → saldo projetado")
+            self.kit_save_button.configure(state="disabled")
+            return
+        source_stock = float(source["stock"]); target_stock = float(target["stock"])
+        source_projected = source_stock - amount; target_projected = target_stock + amount
+        badge = "MONTAGEM" if self.kit_mode_key() == "montagem" else "DESMEMBRAMENTO"
+        self.kit_preview_badge.configure(text=badge, fg_color=COLORS["accent_soft"], text_color=COLORS["accent"])
+        self.kit_source_name.configure(text=product_label(source)); self.kit_source_change.configure(text=f"−{fmt_number(amount)} {source['unit']}")
+        self.kit_source_balance.configure(text=f"Saldo: {fmt_number(source_stock)} → {fmt_number(source_projected)} {source['unit']}", text_color=COLORS["danger"] if source_projected < 0 else COLORS["muted"])
+        self.kit_target_name.configure(text=product_label(target)); self.kit_target_change.configure(text=f"+{fmt_number(amount)} {target['unit']}")
+        self.kit_target_balance.configure(text=f"Saldo: {fmt_number(target_stock)} → {fmt_number(target_projected)} {target['unit']}")
+        self.kit_save_button.configure(state="normal")
+
+    def register_kit_conversion(self):
+        source, target = self.selected_kit_conversion_products()
+        if not source or not target:
+            messagebox.showwarning(APP_NAME, "Selecione os kits de origem e destino.", parent=self); return
+        if self.kit_user.get() not in self.user_names():
+            messagebox.showwarning(APP_NAME, "Cadastre e selecione um usuário responsável na aba Cadastro.", parent=self); return
+        try:
+            amount = float(self.kit_quantity.get().replace(",", "."))
+            movement_date = self.kit_date_entry.get_date().isoformat()
+            editing_batch_id = self.kit_editing_batch_id
+            arguments = (
+                self.kit_mode_key(), int(source["id"]), int(target["id"]), amount,
+                movement_date, self.kit_note.get().strip(), self.kit_user.get(),
+            )
+            if editing_batch_id:self.db.update_kit_conversion(editing_batch_id, *arguments)
+            else:self.db.add_kit_conversion(*arguments)
+        except ValueError as error:
+            messagebox.showwarning(APP_NAME, str(error) or "Revise os dados da conversão.", parent=self); return
+        description = f"{product_label(source)} → {product_label(target)}"
+        action = "atualizada" if editing_batch_id else "registrada"
+        self.reset_kit_conversion_form()
+        self.refresh_all()
+        self.show_movement_result(f"Conversão {action} com sucesso.\n\n{description}\nQuantidade: {fmt_number(amount)} kit(s).")
+
+    def reset_kit_conversion_form(self):
+        self.kit_editing_batch_id = None; self.kit_primary_product_id = None
+        self.kit_product_search.set(""); self.kit_quantity.set("1"); self.kit_note.set("")
+        self.kit_date_entry.set_date(date.today()); self.kit_cancel_edit_button.pack_forget()
+        self.refresh_kit_secondary_options(); self.on_kit_mode_change(self.kit_mode.get())
+
+    def cancel_kit_conversion_edit(self):
+        self.reset_kit_conversion_form()
+
+    def load_kit_conversion_for_edit(self, batch_id: int):
+        conversion = self.db.kit_conversion_batch(batch_id)
+        if not conversion:
+            messagebox.showwarning(APP_NAME, "Essa montagem ou desmontagem não existe mais.", parent=self); return
+        self.show_page("kit_conversion")
+        conversion = self.db.kit_conversion_batch(batch_id)
+        self.kit_editing_batch_id = batch_id
+        self.kit_mode.set("Montagem" if conversion["mode"] == "montagem" else "Desmontagem")
+        primary = conversion["target"] if conversion["mode"] == "montagem" else conversion["source"]
+        secondary = conversion["source"] if conversion["mode"] == "montagem" else conversion["target"]
+        self.kit_primary_product_id = int(primary["product_id"])
+        product = self.db.product(self.kit_primary_product_id)
+        self.kit_product_search.set(product_label(product) if product else "")
+        self.refresh_kit_secondary_options(int(secondary["product_id"]))
+        self.kit_quantity.set(fmt_number(conversion["quantity"]))
+        self.kit_date_entry.set_date(datetime.strptime(conversion["batch"]["movement_date"], "%Y-%m-%d").date())
+        users = self.user_names(); responsible = str(conversion["batch"]["performed_by"] or "")
+        self.kit_user.set(responsible if responsible in users else (users[0] if users else ""))
+        stored_reason = str(conversion["batch"]["reason"] or "")
+        self.kit_note.set(stored_reason.partition(" — ")[2])
+        self.kit_cancel_edit_button.pack(side="right", padx=(0, 10))
+        self.on_kit_mode_change(self.kit_mode.get()); self.update_kit_preview()
+
+    def refresh_kit_conversion(self):
+        if not hasattr(self, "kit_primary_suggestions"):
+            return
+        users = self.user_names(); values = users or ["Cadastre um usuário na aba Cadastro"]
+        self.kit_user_menu.configure(values=values)
+        if self.kit_user.get() not in users:self.kit_user.set(users[0] if users else values[0])
+        if self.kit_primary_product_id and not self.db.product(self.kit_primary_product_id):
+            self.kit_primary_product_id = None; self.kit_product_search.set("")
+        selected_secondary = self.kit_secondary_mapping.get(self.kit_secondary.get())
+        self.refresh_kit_secondary_options(selected_secondary)
+        self.show_kit_product_suggestions(); self.update_kit_preview()
+
     def movements_page(self):
         page = SmoothScrollableFrame(self.content, fg_color="transparent", corner_radius=0, scrollbar_button_color=COLORS["accent"], scrollbar_button_hover_color=COLORS["accent_hover"])
         self.movement_page = page
@@ -2392,7 +2943,7 @@ class EstoqueApp(ctk.CTk):
         product=self.db.product(int(product_id))
         if not product:return
         self.m_selected_product_id=int(product_id);self.m_product.set(self.movement_product_display(product));self.hide_product_suggestions();self.update_current_stock()
-    def operation_map(self, include_inactive=False):return {str(operation["name"]):int(operation["id"]) for operation in self.db.operations(include_inactive=include_inactive)}
+    def operation_map(self, include_inactive=False, include_internal=False):return {str(operation["name"]):int(operation["id"]) for operation in self.db.operations(include_inactive=include_inactive,include_internal=include_internal)}
     def user_names(self, include_inactive=False):return [str(user["name"]) for user in self.db.users(include_inactive=include_inactive)]
     def refresh_user_controls(self):
         names=self.user_names();values=names or ["Cadastre um usuário na aba Cadastro"]
@@ -2412,7 +2963,7 @@ class EstoqueApp(ctk.CTk):
             self.operation_mapping = active
             self.on_operation_change()
         if hasattr(self, "history_filter_menu"):
-            all_operations = self.operation_map(include_inactive=True)
+            all_operations = self.operation_map(include_inactive=True,include_internal=True)
             self.history_operation_mapping = {"Todas as operações": "todos", **all_operations}
             self.history_filter_menu.configure(values=list(self.history_operation_mapping))
             if self.history_filter.get() not in self.history_operation_mapping:
@@ -2519,7 +3070,10 @@ class EstoqueApp(ctk.CTk):
 
     def edit_history_entry(self, history_key: str):
         kind,raw_id=history_key.split(":",1);record_id=int(raw_id)
-        if kind=="batch":self.load_movement_batch_for_edit(record_id);return
+        if kind=="batch":
+            if self.db.kit_conversion_batch(record_id):self.load_kit_conversion_for_edit(record_id)
+            else:self.load_movement_batch_for_edit(record_id)
+            return
         movement=self.db.movement(record_id)
         if not movement:messagebox.showwarning(APP_NAME,"Essa movimentação não existe mais.",parent=self);self.refresh_movements();return
         dialog=MovementDialog(self,movement);self.wait_window(dialog)
@@ -2714,7 +3268,7 @@ class EstoqueApp(ctk.CTk):
     def restore(self):
         source=filedialog.askopenfilename(parent=self,filetypes=[("Backup","*.db")]);
         if source and messagebox.askyesno(APP_NAME,"Substituir os dados atuais?",parent=self):self.db.restore(Path(source));self.refresh_all()
-    def refresh_all(self):self.refresh_products();self.refresh_stock();self.refresh_movements();self.refresh_simulation();self.refresh_counts()
+    def refresh_all(self):self.db.ensure_kit_operations();self.refresh_products();self.refresh_stock();self.refresh_movements();self.refresh_kit_conversion();self.refresh_simulation();self.refresh_counts()
     def close(self):
         try:
             state = self.state()
