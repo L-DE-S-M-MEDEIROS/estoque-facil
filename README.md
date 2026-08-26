@@ -19,6 +19,7 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 
 - Cadastro de produtos sem SKU ou código de barras
 - Organização por Categoria, Grupo/modelo e Variação, mantendo estoque independente
+- Bloqueio de produto duplicado dentro do mesmo grupo, ignorando diferenças de acentos, maiúsculas e espaços; o mesmo nome continua permitido em grupos diferentes
 - Cadastro separado de grupos, com reaproveitamento dos grupos salvos ao criar ou editar produtos
 - Foto opcional, categoria, unidade e estoque mínimo
 - Aba **Estoque atual** com saldo, situação e confiança; a última contagem fica somente na aba **Contagem**

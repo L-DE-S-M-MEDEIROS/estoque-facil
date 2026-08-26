@@ -11,6 +11,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from database_utils import register_database_functions
+
 
 SUPABASE_URL = "https://raleparpityoscsykssk.supabase.co"
 SUPABASE_KEY = "sb_publishable_YLaG2l4ORj5JuJmEsM26Vg_gC27RG_3"
@@ -112,7 +114,7 @@ class CloudSync:
         tables = {}
         for table in TABLES:
             columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
-            tables[table] = [dict(zip(columns, row)) for row in connection.execute(f"SELECT {','.join(columns)} FROM {table}")]
+            tables[table] = [dict(zip(columns, row, strict=True)) for row in connection.execute(f"SELECT {','.join(columns)} FROM {table}")]
         photos = {}
         for row in tables["products"]:
             source = Path(str(row.get("photo") or ""))
@@ -183,6 +185,23 @@ class CloudSync:
         payload = snapshot["payload"]
         if payload.get("format") != 1:
             raise CloudSyncError("A cópia na nuvem usa um formato incompatível.")
+        tables = payload.get("tables")
+        if not isinstance(tables, dict):
+            raise CloudSyncError("A cópia na nuvem não contém tabelas válidas.")
+        allowed_columns = {
+            table: {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+            for table in TABLES
+        }
+        for table in TABLES:
+            rows = tables.get(table, [])
+            if not isinstance(rows, list):
+                raise CloudSyncError("A cópia na nuvem contém uma tabela inválida.")
+            for row in rows:
+                if not isinstance(row, dict) or not row or not set(row).issubset(allowed_columns[table]):
+                    raise CloudSyncError("A cópia na nuvem contém colunas inválidas.")
+        if not isinstance(payload.get("photos", {}), dict):
+            raise CloudSyncError("A cópia na nuvem contém fotos inválidas.")
+        register_database_functions(connection)
         backup = self.folder / f"antes-da-sincronizacao-{datetime.now():%Y%m%d-%H%M%S}.db"
         connection.commit()
         backup_connection = sqlite3.connect(backup)
@@ -194,7 +213,7 @@ class CloudSync:
                 for table in reversed(TABLES):
                     connection.execute(f"DELETE FROM {table}")
                 for table in TABLES:
-                    rows = payload["tables"].get(table, [])
+                    rows = tables.get(table, [])
                     for row in rows:
                         values = dict(row)
                         if table == "products" and values.get("photo"):

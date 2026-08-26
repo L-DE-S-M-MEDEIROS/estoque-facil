@@ -9,7 +9,6 @@ import shutil
 import sqlite3
 import sys
 import threading
-import unicodedata
 from datetime import date, datetime, timezone
 from pathlib import Path
 import tkinter as tk
@@ -28,12 +27,13 @@ from xml.sax.saxutils import escape as xml_escape
 from premium_icons import app_icon, application_icon_path, brand_mark, icon
 from premium_widgets import MaskedDateEntry, SmoothScrollableFrame, TreeConfidenceOverlay, TreeRelativeDateOverlay, TreeRowSeparatorOverlay, TreeStockOverlay, confidence_tier, tree_wheel_units
 from cloud_sync import CloudSync, CloudSyncError
+from database_utils import configure_database_connection, normalize_identity_text
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
 from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.1.16"
+APP_VERSION = "1.1.17"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 
 COLORS = {
@@ -164,8 +164,7 @@ def fmt_number(value: float) -> str:
 
 def normalize_search_text(value: object) -> str:
     """Normalize case and accents so partial searches stay intuitive."""
-    decomposed = unicodedata.normalize("NFKD", str(value or "").casefold())
-    return "".join(character for character in decomposed if not unicodedata.combining(character))
+    return normalize_identity_text(value)
 
 
 def product_matches_search(product: sqlite3.Row, query: str) -> bool:
@@ -334,9 +333,9 @@ def mapped_sales_list(database, items) -> tuple[list[dict], list[dict]]:
 class Database:
     def __init__(self) -> None:
         self.path = data_dir() / "estoque.db"
-        self.db = sqlite3.connect(self.path)
+        self.db = sqlite3.connect(self.path, timeout=5)
         self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA foreign_keys=ON")
+        configure_database_connection(self.db)
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS products(
                 id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
@@ -399,6 +398,29 @@ class Database:
             self.db.execute("ALTER TABLE products ADD COLUMN group_name TEXT NOT NULL DEFAULT ''")
         if "variant" not in columns:
             self.db.execute("ALTER TABLE products ADD COLUMN variant TEXT NOT NULL DEFAULT ''")
+        self.db.executescript("""
+            CREATE TRIGGER IF NOT EXISTS prevent_duplicate_product_insert
+            BEFORE INSERT ON products
+            WHEN EXISTS(
+                SELECT 1 FROM products current
+                WHERE normalize_identity_text(current.name)=normalize_identity_text(NEW.name)
+                  AND normalize_identity_text(current.group_name)=normalize_identity_text(NEW.group_name)
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'duplicate_product_same_group');
+            END;
+            CREATE TRIGGER IF NOT EXISTS prevent_duplicate_product_update
+            BEFORE UPDATE OF name,group_name ON products
+            WHEN EXISTS(
+                SELECT 1 FROM products current
+                WHERE current.id<>NEW.id
+                  AND normalize_identity_text(current.name)=normalize_identity_text(NEW.name)
+                  AND normalize_identity_text(current.group_name)=normalize_identity_text(NEW.group_name)
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'duplicate_product_same_group');
+            END;
+        """)
         self.db.execute("""INSERT OR IGNORE INTO product_groups(name,active,created_at)
             SELECT DISTINCT TRIM(group_name),1,? FROM products WHERE TRIM(COALESCE(group_name,''))<>''""", (datetime.now().isoformat(timespec="seconds"),))
         movement_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(movements)")}
@@ -590,13 +612,48 @@ class Database:
         return self.db.execute("""SELECT p.*,COALESCE(SUM(m.quantity),0) stock
             FROM products p LEFT JOIN movements m ON m.product_id=p.id WHERE p.id=? GROUP BY p.id""", (product_id,)).fetchone()
 
+    def duplicate_product(self, name: str, group_name: str, product_id: int | None = None) -> sqlite3.Row | None:
+        query = """SELECT id,name,group_name FROM products
+            WHERE normalize_identity_text(name)=?
+              AND normalize_identity_text(group_name)=?"""
+        arguments: list[object] = [normalize_identity_text(name), normalize_identity_text(group_name)]
+        if product_id is not None:
+            query += " AND id<>?"
+            arguments.append(int(product_id))
+        query += " ORDER BY id LIMIT 1"
+        return self.db.execute(query, arguments).fetchone()
+
     def save_product(self, values: dict, product_id: int | None = None) -> None:
-        fields = (values["name"], values["category"], values["group_name"], values["variant"], values["unit"], values["minimum"], values["photo"], values["notes"])
-        if product_id:
-            self.db.execute("UPDATE products SET name=?,category=?,group_name=?,variant=?,unit=?,minimum=?,photo=?,notes=? WHERE id=?", fields + (product_id,))
-        else:
-            self.db.execute("INSERT INTO products(name,category,group_name,variant,unit,minimum,photo,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?)", fields + (datetime.now().isoformat(timespec="seconds"),))
-        self.db.commit()
+        name = " ".join(str(values.get("name") or "").strip().split())
+        group_name = " ".join(str(values.get("group_name") or "").strip().split())
+        if not name:
+            raise ValueError("Informe o nome do produto.")
+        if product_id is not None and not self.product(int(product_id)):
+            raise ValueError("Esse produto não existe mais.")
+        if self.duplicate_product(name, group_name, product_id):
+            group_label = group_name or "Sem grupo"
+            raise ValueError(f"Já existe o produto “{name}” no grupo “{group_label}”.")
+        fields = (
+            name,
+            " ".join(str(values.get("category") or "").strip().split()),
+            group_name,
+            " ".join(str(values.get("variant") or "").strip().split()),
+            str(values.get("unit") or "un").strip() or "un",
+            values.get("minimum", 0),
+            str(values.get("photo") or ""),
+            str(values.get("notes") or "").strip(),
+        )
+        try:
+            with self.db:
+                if product_id is not None:
+                    self.db.execute("UPDATE products SET name=?,category=?,group_name=?,variant=?,unit=?,minimum=?,photo=?,notes=? WHERE id=?", fields + (int(product_id),))
+                else:
+                    self.db.execute("INSERT INTO products(name,category,group_name,variant,unit,minimum,photo,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?)", fields + (datetime.now().isoformat(timespec="seconds"),))
+        except sqlite3.IntegrityError as error:
+            if "duplicate_product_same_group" in str(error):
+                group_label = group_name or "Sem grupo"
+                raise ValueError(f"Já existe o produto “{name}” no grupo “{group_label}”.") from error
+            raise
 
     def delete_product(self, product_id: int) -> bool:
         if self.db.execute("SELECT 1 FROM movements WHERE product_id=? LIMIT 1", (product_id,)).fetchone():
@@ -1027,12 +1084,17 @@ class ProductDialog(BrandedToplevel):
             minimum = float(self.minimum.get().replace(",", ".") or 0)
             if minimum < 0: raise ValueError
         except ValueError: messagebox.showwarning(APP_NAME, "O estoque mínimo deve ser um número positivo.", parent=self); return
+        group_name = "" if self.group_name.get() == "Sem grupo" else self.group_name.get().strip()
+        product_id = int(self.product["id"]) if self.product else None
+        if self.parent.db.duplicate_product(name, group_name, product_id):
+            group_label = group_name or "Sem grupo"
+            messagebox.showwarning(APP_NAME, f"Já existe o produto “{name}” no grupo “{group_label}”.\n\nEdite o cadastro existente em vez de criar outro.", parent=self)
+            return
         photo = self.photo
         if photo and (not self.product or photo != self.product["photo"]):
             source = Path(photo)
             if source.exists():
                 target = data_dir()/"fotos"/f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}{source.suffix.lower()}"; shutil.copy2(source, target); photo = str(target)
-        group_name = "" if self.group_name.get() == "Sem grupo" else self.group_name.get().strip()
         self.result = {"name": name, "category": self.category.get().strip(), "group_name": group_name, "variant": self.variant.get().strip(), "unit": self.unit.get(), "minimum": minimum, "photo": photo, "notes": self.notes.get("1.0", "end").strip()}; self.destroy()
 
 
@@ -1137,7 +1199,10 @@ class ProductManagerDialog(BrandedToplevel):
         selected=self.tree.selection();return int(selected[0]) if selected else None
     def _open_editor(self,product=None):
         self.grab_release();dialog=ProductDialog(self.parent,product);self.wait_window(dialog);self.grab_set()
-        if dialog.result:self.parent.db.save_product(dialog.result,int(product["id"]) if product else None);self.refresh();self.parent.refresh_all()
+        if not dialog.result:return
+        try:self.parent.db.save_product(dialog.result,int(product["id"]) if product else None)
+        except ValueError as error:messagebox.showwarning(APP_NAME,str(error),parent=self);return
+        self.refresh();self.parent.refresh_all()
     def new_product(self):self._open_editor()
     def edit_product(self):
         product_id=self.selected_product()
@@ -1700,7 +1765,7 @@ class EstoqueApp(ctk.CTk):
 
     def table(self,parent,columns,headings,widths):
         tree=ttk.Treeview(parent,columns=columns,show="headings",selectmode="browse")
-        for col,label,width in zip(columns,headings,widths): tree.heading(col,text=label,anchor="center"); tree.column(col,width=width,anchor="center")
+        for col,label,width in zip(columns,headings,widths,strict=True): tree.heading(col,text=label,anchor="center"); tree.column(col,width=width,anchor="center")
         separator=TreeRowSeparatorOverlay(tree,COLORS);tree._row_separator=separator;self.table_separators.append(separator)
         original_insert,original_delete=tree.insert,tree.delete
         def insert_with_separator(*args,**kwargs):
@@ -1774,13 +1839,19 @@ class EstoqueApp(ctk.CTk):
 
     def new_product(self):
         dialog=ProductDialog(self);self.wait_window(dialog)
-        if dialog.result:self.db.save_product(dialog.result);self.refresh_all()
+        if not dialog.result:return
+        try:self.db.save_product(dialog.result)
+        except ValueError as error:messagebox.showwarning(APP_NAME,str(error),parent=self);return
+        self.refresh_all()
 
     def edit_product(self):
         pid=self.selected_product()
         if not pid:messagebox.showinfo(APP_NAME,"Selecione um produto para editar.",parent=self);return
         dialog=ProductDialog(self,self.db.product(pid));self.wait_window(dialog)
-        if dialog.result:self.db.save_product(dialog.result,pid);self.refresh_all()
+        if not dialog.result:return
+        try:self.db.save_product(dialog.result,pid)
+        except ValueError as error:messagebox.showwarning(APP_NAME,str(error),parent=self);return
+        self.refresh_all()
 
     def delete_product(self):
         pid=self.selected_product()
@@ -1819,7 +1890,7 @@ class EstoqueApp(ctk.CTk):
             stock=float(p["stock"]);units+=stock;status="Negativo" if stock<0 else "Sem estoque" if stock==0 else "Estoque baixo" if stock<=float(p["minimum"]) else "Normal";low+=status!="Normal";trust=self.db.stock_confidence(int(p["id"]),stock);low_confidence+=trust["level"]=="Baixa";scores[int(p["id"])]=trust["score"];quantities[int(p["id"])]=(stock,fmt_number(stock));self.stock_tree.insert("","end",iid=str(p["id"]),values=("",p["name"],"",""))
         self.stock_confidence_cells.set_scores(scores)
         self.stock_quantity_cells.set_quantities(quantities)
-        for label,text in zip(self.stock_cards,(str(len(items)),fmt_number(units),str(low),str(low_confidence))):label.configure(text=text)
+        for label,text in zip(self.stock_cards,(str(len(items)),fmt_number(units),str(low),str(low_confidence)),strict=True):label.configure(text=text)
 
     def simulation_page(self):
         page=SmoothScrollableFrame(self.content,fg_color="transparent",corner_radius=0,scrollbar_button_color=COLORS["accent"],scrollbar_button_hover_color=COLORS["accent_hover"])
@@ -1963,7 +2034,7 @@ class EstoqueApp(ctk.CTk):
         self.sim_print_button.configure(state="normal" if rows else "disabled")
         if rows:self.simulation_empty_label.pack_forget()
         else:self.simulation_empty_label.pack(fill="x",padx=20,pady=(0,8),before=self.simulation_table)
-        for label,text in zip(self.simulation_cards,(str(len(valid_items)),fmt_number(total),str(len(negative)))):label.configure(text=text,text_color=("#5A0B1A","#FFB3BE") if label is self.simulation_cards[2] and negative else COLORS["text"])
+        for label,text in zip(self.simulation_cards,(str(len(valid_items)),fmt_number(total),str(len(negative))),strict=True):label.configure(text=text,text_color=("#5A0B1A","#FFB3BE") if label is self.simulation_cards[2] and negative else COLORS["text"])
         if negative:
             details="\n".join(f"• {product_label(product)}: {fmt_number(projected)} {product['unit']}" for product,projected in negative);self.simulation_negative_text.configure(text=details)
             if not self.simulation_negative_alert.winfo_manager():self.simulation_negative_alert.pack(fill="x",pady=(0,14),before=self.simulation_result_card)
@@ -2114,7 +2185,7 @@ class EstoqueApp(ctk.CTk):
         self.count_confidence_cells.set_scores(visible_scores)
         self.count_age_cells.set_ages(visible_ages)
         average=round(total_score/len(all_items)) if all_items else 0
-        for label,text in zip(self.count_cards,(str(pending),str(counted_today),str(differences_today),f"{average}%")):label.configure(text=text)
+        for label,text in zip(self.count_cards,(str(pending),str(counted_today),str(differences_today),f"{average}%"),strict=True):label.configure(text=text)
         if not self.count_product_suggestions_collapsed:self.show_count_product_suggestions()
 
     def movements_page(self):
@@ -2544,7 +2615,8 @@ class EstoqueApp(ctk.CTk):
         self.cloud_sync_busy=True;self.cloud_sync_pending=False;self.cloud_sync_timer=None
         if hasattr(self,"cloud_status"):self.cloud_status.set(f"Conectado como {self.cloud.email} — sincronizando...")
         def worker():
-            connection=sqlite3.connect(self.db.path)
+            connection=sqlite3.connect(self.db.path,timeout=5)
+            configure_database_connection(connection)
             try:self.cloud_events.put(("success",self.cloud.synchronize(connection,prefer_local),silent))
             except CloudSyncError as error:self.cloud_events.put(("error",str(error),silent))
             except (KeyError,ValueError,sqlite3.Error,OSError) as error:self.cloud_events.put(("error",f"Não foi possível sincronizar: {error}",silent))

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import app
 from pypdf import PdfReader
-from cloud_sync import CloudSync, TABLES
+from cloud_sync import CloudSync, CloudSyncError, TABLES
 from premium_icons import app_icon, application_icon_path
 from PIL import Image
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
@@ -71,6 +72,35 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertTrue(app.product_matches_search(product, "4 pec"))
         self.assertTrue(app.product_matches_search(product, "matern"))
         self.assertFalse(app.product_matches_search(product, "caramelo"))
+
+    def test_duplicate_product_in_same_group_is_blocked_after_normalization(self):
+        product_id = self.create_product(name="MARÍNHO", group="4 PEÇAS")
+        duplicate = {
+            "name": "  marinho  ",
+            "category": "Outra categoria",
+            "group_name": "  4 pecas ",
+            "variant": "Outra variação",
+            "unit": "un",
+            "minimum": 0,
+            "photo": "",
+            "notes": "",
+        }
+        with self.assertRaisesRegex(ValueError, "Já existe o produto"):
+            self.db.save_product(duplicate)
+        self.db.save_product(dict(self.db.product(product_id)), product_id)
+        self.assertEqual(len(self.db.products()), 1)
+
+    def test_same_product_is_allowed_in_different_groups(self):
+        self.create_product(name="MARINHO", group="2 PEÇAS")
+        self.db.save_product({"name":"marinho","category":"Bolsa maternidade","group_name":"4 peças","variant":"","unit":"un","minimum":0,"photo":"","notes":""})
+        self.assertEqual(len(self.db.products()), 2)
+
+    def test_database_trigger_also_blocks_direct_duplicate_insert(self):
+        self.create_product(name="CARAMELO", group="FITA 2 PEÇAS")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "duplicate_product_same_group"):
+            with self.db.db:
+                self.db.db.execute("""INSERT INTO products(name,category,group_name,variant,unit,minimum,photo,notes,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?)""", (" caramelo ","","fita 2 pecas","","un",0,"","",datetime.now().isoformat()))
 
     def test_count_product_picker_preference_is_persistent(self):
         path = Path(self.temporary_directory.name) / "ui-preferences.json"
@@ -229,6 +259,16 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertEqual(payload["tables"]["products"][0]["photo"], "produto.png")
         self.assertIn("produto.png", payload["photos"])
         self.assertNotIn("simulation", payload)
+
+    def test_cloud_download_rejects_unknown_columns_without_changing_local_data(self):
+        product_id = self.create_product()
+        sync = CloudSync(app.data_dir(), {})
+        payload = sync.export_payload(self.db.db)
+        payload["tables"]["products"][0]["unknown_column"] = "unsafe"
+        snapshot = {"payload": payload, "revision": 2, "updated_at": "2026-08-26T10:00:00+00:00"}
+        with self.assertRaisesRegex(CloudSyncError, "colunas inválidas"):
+            sync._download_snapshot(self.db.db, snapshot)
+        self.assertEqual(self.db.product(product_id)["name"], "MARINHO")
 
     def test_sku_mapping_remembers_multiple_products_and_normalizes_lookup(self):
         first_id = self.create_product(name="BOLSA", variant="Caramelo")
