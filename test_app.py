@@ -331,7 +331,7 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertEqual(rows[0]["product_id"],1)
         self.assertEqual(rows[0]["projected"],50)
 
-    def test_simulation_print_pdf_contains_only_product_and_simulated_quantity(self):
+    def test_simulation_print_pdf_contains_product_quantity_and_manual_check_box(self):
         products = [{"id":1,"name":"MARINHO","group_name":"4 PEÇAS","variant":"","category":"","stock":80,"unit":"un"}]
         rows = app.simulation_selected_rows(products,[{"product_id":1,"quantity":30}],"saida")
         output = Path(self.temporary_directory.name) / "lista-simulacao.pdf"
@@ -340,6 +340,8 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertIn("4 PEÇAS",text)
         self.assertIn("MARINHO",text)
         self.assertIn("30 un",text)
+        self.assertIn("Conferência",text)
+        self.assertIn("quantidade separada fisicamente",text)
         self.assertNotIn("Estoque atual",text)
         self.assertNotIn("Saldo projetado",text)
 

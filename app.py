@@ -33,7 +33,7 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 SEARCH_RESULT_LIMIT = 36
 
@@ -310,7 +310,7 @@ def simulation_selected_rows(products, items, operation: str) -> list[dict]:
 
 
 def build_simulation_print_pdf(output_path: Path, rows: list[dict], operation: str, generated_at: datetime | None = None) -> Path:
-    """Create a separation list containing only simulated products and quantities."""
+    """Create a separation list with space for a manual physical check."""
 
     if not rows:
         raise ValueError("Adicione produtos à simulação antes de imprimir.")
@@ -327,21 +327,33 @@ def build_simulation_print_pdf(output_path: Path, rows: list[dict], operation: s
     story = [
         Paragraph("Lista de separação - Simulação", title_style),
         Paragraph(f"Operação simulada: {operation_label} &nbsp;&nbsp;|&nbsp;&nbsp; {len(rows)} produto(s) &nbsp;&nbsp;|&nbsp;&nbsp; Gerada em {timestamp.strftime('%d/%m/%Y às %H:%M')}", meta_style),
+        Spacer(1, 2.5*mm),
+        Paragraph("Anote na coluna <b>Conferência</b> a quantidade separada fisicamente.", meta_style),
         Spacer(1, 6*mm),
     ]
-    table_data = [[Paragraph("Produto", cell_style), Paragraph("Quantidade simulada", quantity_style)]]
+    table_data = [[
+        Paragraph("Produto", cell_style),
+        Paragraph("Quantidade simulada", quantity_style),
+        Paragraph("Conferência", quantity_style),
+    ]]
     for row in rows:
         product = row["product"]
+        confirmation_box = Table([[""]], colWidths=[27*mm], rowHeights=[7*mm])
+        confirmation_box.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.8, pdf_colors.HexColor("#7C8EA1")),
+            ("BACKGROUND", (0, 0), (-1, -1), pdf_colors.white),
+        ]))
         table_data.append([
             Paragraph(xml_escape(product_label(product)), cell_style),
             Paragraph(f"{fmt_number(row['quantity'])} {xml_escape(str(product['unit']))}", quantity_style),
+            confirmation_box,
         ])
-    table = Table(table_data, colWidths=[132*mm, 43*mm], repeatRows=1, hAlign="LEFT")
+    table = Table(table_data, colWidths=[104*mm, 34*mm, 37*mm], repeatRows=1, hAlign="LEFT")
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), pdf_colors.HexColor("#E4F0F7")),
         ("TEXTCOLOR", (0, 0), (-1, 0), pdf_colors.HexColor("#245F89")),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("ALIGN", (1, 0), (1, -1), "CENTER"),
+        ("ALIGN", (1, 0), (-1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("GRID", (0, 0), (-1, -1), 0.35, pdf_colors.HexColor("#D5DEE7")),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [pdf_colors.white, pdf_colors.HexColor("#F8FAFC")]),
