@@ -33,7 +33,7 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.2.4"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 SEARCH_RESULT_LIMIT = 36
 
@@ -41,6 +41,11 @@ KIT_PIECE_COUNTS = (2, 4, 5)
 KIT_INTERNAL_OPERATIONS = {
     "montagem": "kit_assembly",
     "desmembramento": "kit_disassembly",
+}
+
+QUICK_STOCK_ACTIONS = {
+    "Defeito": ("DEFEITO", "negative", -1),
+    "Devolução": ("DEVOLUÇÃO", "positive", 1),
 }
 
 COLORS = {
@@ -920,6 +925,38 @@ class Database:
     def add_movement(self, product_id: int, operation: int | str, informed: float, movement_date: str, reason: str, checked_by: str = "") -> None:
         responsible = checked_by.strip() or "Contagem"
         self.add_movement_batch(operation, [(product_id, informed)], movement_date, reason, responsible)
+
+    def add_quick_stock_movement(
+        self,
+        action: str,
+        product_id: int,
+        movement_date: str,
+        performed_by: str,
+    ) -> int:
+        """Register exactly one defective or returned unit using the matching operation."""
+        definition = QUICK_STOCK_ACTIONS.get(action)
+        if not definition:
+            raise ValueError("Escolha Defeito ou Devolução.")
+        operation_name, expected_effect, _delta = definition
+        operation = self.operation(operation_name)
+        effect_label = "negativo" if expected_effect == "negative" else "positivo"
+        if not operation or not operation["active"]:
+            raise ValueError(
+                f"Cadastre ou reative a operação “{operation_name}” com efeito {effect_label} na aba Cadastro."
+            )
+        if operation["effect"] != expected_effect:
+            raise ValueError(
+                f"A operação “{operation_name}” precisa ter efeito {effect_label}. Corrija-a na aba Cadastro."
+            )
+        if not self.product(int(product_id)):
+            raise ValueError("Esse produto não existe mais.")
+        return self.add_movement_batch(
+            int(operation["id"]),
+            [(int(product_id), 1)],
+            movement_date,
+            f"Registro rápido: {action}",
+            performed_by,
+        )
 
     def _validate_kit_conversion(
         self,
@@ -1976,7 +2013,7 @@ class EstoqueApp(ctk.CTk):
         self._last_window_state = self.settings.get("window_state", "zoomed") if self.settings.get("window_state") in ("normal", "zoomed") else "zoomed"
         apply_window_icon(self); self.protocol("WM_DELETE_WINDOW", self.close)
         self.brand_icon = brand_mark(86)
-        self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "kit_conversion", "simulation", "count", "settings", "registration", "user", "operation", "group", "plus", "search", "edit", "trash", "download", "upload", "refresh", "print", "collapse", "expand")}
+        self.icons = {name: icon(name, 22) for name in ("products", "stock", "movements", "defect_return", "kit_conversion", "simulation", "count", "settings", "registration", "user", "operation", "group", "plus", "search", "edit", "trash", "download", "upload", "refresh", "print", "collapse", "expand")}
         self.table_separators: list[TreeRowSeparatorOverlay] = []
         self._ui_jobs: dict[str, str] = {}
         self.update_events: queue.Queue = queue.Queue(); self.update_busy = False; self.update_button = None
@@ -2022,6 +2059,8 @@ class EstoqueApp(ctk.CTk):
         if hasattr(self,"count_product_suggestions_collapsed"):self.settings["count_products_expanded"] = not self.count_product_suggestions_collapsed
         if hasattr(self,"m_operation"):self.settings["movement_operation"] = self.m_operation.get()
         if hasattr(self,"m_user"):self.settings["movement_user"] = self.m_user.get()
+        if hasattr(self,"quick_action"):self.settings["quick_stock_action"] = self.quick_action.get()
+        if hasattr(self,"quick_user"):self.settings["quick_stock_user"] = self.quick_user.get()
         if hasattr(self,"kit_mode"):self.settings["kit_conversion_mode"] = self.kit_mode.get()
         if hasattr(self,"kit_user"):self.settings["kit_conversion_user"] = self.kit_user.get()
         if hasattr(self,"history_filter"):self.settings["history_filter"] = self.history_filter.get()
@@ -2057,8 +2096,8 @@ class EstoqueApp(ctk.CTk):
         brand = ctk.CTkFrame(logo, fg_color="transparent"); brand.pack(side="left", padx=13)
         ctk.CTkLabel(brand, text="ESTOQUE", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 16, "bold")).pack(anchor="w")
         ctk.CTkLabel(brand, text="BOLSAS BABY", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10, "bold")).pack(anchor="w", pady=(2,0))
-        for key, label in (("stock","Estoque atual"),("movements","Movimentações"),("kit_conversion","Montagem / Desmontagem"),("simulation","Simulação"),("count","Contagem"),("registration","Cadastro"),("settings","Configurações")):
-            font_size = 11 if key == "kit_conversion" else 13
+        for key, label in (("stock","Estoque atual"),("movements","Movimentações"),("defect_return","Defeito / Devolução"),("kit_conversion","Montagem / Desmontagem"),("simulation","Simulação"),("count","Contagem"),("registration","Cadastro"),("settings","Configurações")):
+            font_size = 11 if key in ("defect_return", "kit_conversion") else 13
             button = ctk.CTkButton(self.sidebar, text=label, image=self.icons[key], compound="left", anchor="w", height=48, corner_radius=10, fg_color="transparent", hover_color=COLORS["surface_hover"], text_color=COLORS["muted"], font=ctk.CTkFont("Inter", font_size, "bold"), command=lambda k=key:self.show_page(k))
             button.pack(fill="x", padx=16, pady=4); self.nav_buttons[key]=button
         self.sidebar_status=ctk.CTkLabel(self.sidebar, text=f"●  Local + nuvem segura\n    Versão {APP_VERSION}", justify="left", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10));self.sidebar_status.pack(side="bottom", anchor="w", padx=26, pady=28)
@@ -2068,7 +2107,7 @@ class EstoqueApp(ctk.CTk):
         if key == self.current_page and key in self.pages:return
         self.capture_interface_preferences()
         for page in self.pages.values(): page.grid_remove()
-        if key not in self.pages: self.pages[key]={"registration":self.registration_page,"stock":self.stock_page,"movements":self.movements_page,"kit_conversion":self.kit_conversion_page,"simulation":self.simulation_page,"count":self.count_page,"settings":self.settings_page}[key]()
+        if key not in self.pages: self.pages[key]={"registration":self.registration_page,"stock":self.stock_page,"movements":self.movements_page,"defect_return":self.defect_return_page,"kit_conversion":self.kit_conversion_page,"simulation":self.simulation_page,"count":self.count_page,"settings":self.settings_page}[key]()
         self.pages[key].grid(row=0,column=0,sticky="nsew",padx=32,pady=28)
         self.current_page=key;self.settings["last_page"]=key;self.schedule_settings_save()
         for name,button in self.nav_buttons.items():
@@ -2079,7 +2118,7 @@ class EstoqueApp(ctk.CTk):
                 border_width=1 if selected else 0,
                 border_color=COLORS["accent"] if selected else COLORS["sidebar"],
             )
-        refresh={"registration":lambda:None,"stock":self.refresh_stock,"movements":self.refresh_movement_page,"kit_conversion":self.refresh_kit_conversion,"simulation":self.refresh_simulation_page,"count":self.refresh_counts,"settings":lambda:None}[key]
+        refresh={"registration":lambda:None,"stock":self.refresh_stock,"movements":self.refresh_movement_page,"defect_return":self.refresh_defect_return_page,"kit_conversion":self.refresh_kit_conversion,"simulation":self.refresh_simulation_page,"count":self.refresh_counts,"settings":lambda:None}[key]
         self.schedule_ui_task("page_refresh",lambda:refresh() if self.current_page==key else None,1)
 
     def table(self,parent,columns,headings,widths):
@@ -2363,6 +2402,182 @@ class EstoqueApp(ctk.CTk):
             details="\n".join(f"• {product_label(product)}: {fmt_number(projected)} {product['unit']}" for product,projected in negative);self.simulation_negative_text.configure(text=details)
             if not self.simulation_negative_alert.winfo_manager():self.simulation_negative_alert.pack(fill="x",pady=(0,14),before=self.simulation_result_card)
         elif self.simulation_negative_alert.winfo_manager():self.simulation_negative_alert.pack_forget()
+
+    def defect_return_page(self):
+        page = SmoothScrollableFrame(
+            self.content, fg_color="transparent", corner_radius=0,
+            scrollbar_button_color=COLORS["accent"],
+            scrollbar_button_hover_color=COLORS["accent_hover"],
+        )
+        PageTitle(
+            page,
+            "Defeito / Devolução",
+            "Registre rapidamente uma única unidade e siga para o próximo produto.",
+        ).pack(fill="x", pady=(0, 20))
+
+        saved_action = self.settings.get("quick_stock_action", "Defeito")
+        if saved_action not in QUICK_STOCK_ACTIONS:
+            saved_action = "Defeito"
+        users = self.user_names()
+        saved_user = self.settings.get("quick_stock_user", "")
+        selected_user = saved_user if saved_user in users else (users[0] if users else "Cadastre um usuário na aba Cadastro")
+        self.quick_action = tk.StringVar(value=saved_action)
+        self.quick_user = tk.StringVar(value=selected_user)
+        self.quick_product = tk.StringVar()
+        self.quick_selected_product_id: int | None = None
+        self.quick_product_suggestions_collapsed = True
+
+        action_card = Card(page); action_card.pack(fill="x", pady=(0, 16))
+        action_content = ctk.CTkFrame(action_card, fg_color="transparent"); action_content.pack(fill="x", padx=22, pady=20)
+        ctk.CTkLabel(action_content, text="Escolha a ação", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 16, "bold")).pack(anchor="w")
+        ctk.CTkLabel(action_content, text="Defeito retira 1 unidade. Devolução adiciona 1 unidade.", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10)).pack(anchor="w", pady=(4, 12))
+        self.quick_action_selector = ctk.CTkSegmentedButton(
+            action_content, variable=self.quick_action, values=list(QUICK_STOCK_ACTIONS),
+            height=42, corner_radius=9, selected_color=COLORS["accent"],
+            selected_hover_color=COLORS["accent_hover"], command=self.on_quick_action_change,
+        )
+        self.quick_action_selector.pack(fill="x"); self.quick_action_selector.set(saved_action)
+
+        form = Card(page); form.pack(fill="x")
+        content = ctk.CTkFrame(form, fg_color="transparent"); content.pack(fill="x", padx=22, pady=20)
+        ctk.CTkLabel(content, text="Produto", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 16, "bold")).pack(anchor="w")
+        ctk.CTkLabel(content, text="Digite o grupo, o produto, a cor ou a variação.", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10)).pack(anchor="w", pady=(4, 10))
+        self.quick_product_search = ctk.CTkFrame(content, height=46, corner_radius=10, fg_color=COLORS["surface"], border_width=2, border_color=COLORS["accent"])
+        self.quick_product_search.pack(fill="x", pady=(0, 8)); self.quick_product_search.grid_columnconfigure(1, weight=1); self.quick_product_search.grid_propagate(False)
+        ctk.CTkLabel(self.quick_product_search, text="", image=self.icons["search"], width=38).grid(row=0, column=0, sticky="nsew", padx=(7, 0), pady=4)
+        self.quick_product_entry = ctk.CTkEntry(
+            self.quick_product_search, textvariable=self.quick_product,
+            placeholder_text="Buscar produto, grupo ou variação...", height=36,
+            corner_radius=0, border_width=0, fg_color="transparent",
+        )
+        self.quick_product_entry.grid(row=0, column=1, sticky="nsew", padx=(0, 2), pady=3)
+        self.quick_product_entry.bind("<FocusIn>", lambda _event:self.schedule_ui_task("quick_product_search", lambda:self.show_quick_product_suggestions(force=True), 50))
+        self.quick_product_entry.bind("<KeyRelease>", self.on_quick_product_search)
+        self.quick_product_entry.bind("<Return>", lambda _event:self.select_first_quick_product())
+        self.quick_product_suggestions_toggle = ctk.CTkButton(
+            self.quick_product_search, text="", image=self.icons["expand"], width=38, height=34,
+            corner_radius=8, fg_color=COLORS["surface_alt"], hover_color=COLORS["surface_hover"],
+            command=self.toggle_quick_product_suggestions,
+        )
+        self.quick_product_suggestions_toggle.grid(row=0, column=2, sticky="e", padx=(2, 5), pady=4)
+        self.quick_product_suggestions = SmoothScrollableFrame(
+            content, height=205, corner_radius=9, fg_color=COLORS["surface_alt"],
+            border_width=1, border_color=COLORS["border"],
+            scrollbar_button_color=COLORS["accent"], scrollbar_button_hover_color=COLORS["accent_hover"],
+        )
+
+        info = ctk.CTkFrame(content, fg_color="transparent"); info.pack(fill="x", pady=(4, 12)); info.grid_columnconfigure((0, 1), weight=1)
+        self.quick_current = ctk.CTkLabel(info, text="Saldo atual: —", height=40, corner_radius=9, fg_color=COLORS["accent_soft"], text_color=COLORS["accent"], font=ctk.CTkFont("Inter", 11, "bold"))
+        self.quick_current.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        user_box = ctk.CTkFrame(info, fg_color="transparent"); user_box.grid(row=0, column=1, sticky="ew", padx=(8, 0)); user_box.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(user_box, text="Responsável", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10, "bold")).grid(row=0, column=0, padx=(0, 10))
+        self.quick_user_menu = ctk.CTkOptionMenu(
+            user_box, variable=self.quick_user, values=users or [selected_user], height=40,
+            corner_radius=9, fg_color=COLORS["surface_alt"], button_color=COLORS["surface_hover"],
+            button_hover_color=COLORS["accent_soft"], text_color=COLORS["text"],
+            dropdown_fg_color=COLORS["surface"], dropdown_hover_color=COLORS["accent_soft"],
+        )
+        self.quick_user_menu.grid(row=0, column=1, sticky="ew")
+        self.quick_register_button = ctk.CTkButton(
+            content, text="", height=46, corner_radius=10,
+            fg_color=COLORS["danger"], hover_color=COLORS["danger"],
+            font=ctk.CTkFont("Inter", 13, "bold"), command=self.register_quick_stock_movement,
+        )
+        self.quick_register_button.pack(fill="x")
+        self.quick_status = ctk.CTkLabel(
+            content, text="Cada confirmação movimenta exatamente 1 unidade.",
+            height=42, corner_radius=9, fg_color=COLORS["surface_alt"],
+            text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10), wraplength=900,
+        )
+        self.quick_status.pack(fill="x", pady=(10, 0))
+        self.on_quick_action_change(saved_action)
+        self.after_idle(self.quick_product_entry.focus_set)
+        return page
+
+    def quick_product_results(self, query=""):
+        return [product for product in self.db.products() if product_matches_search(product, query)]
+
+    def hide_quick_product_suggestions(self):
+        if hasattr(self, "quick_product_suggestions"):
+            self.quick_product_suggestions.pack_forget(); self.quick_product_suggestions_collapsed = True
+            self.quick_product_suggestions_toggle.configure(image=self.icons["expand"])
+
+    def toggle_quick_product_suggestions(self):
+        if self.quick_product_suggestions_collapsed:self.show_quick_product_suggestions(force=True);self.quick_product_entry.focus_set()
+        else:self.hide_quick_product_suggestions()
+
+    def show_quick_product_suggestions(self, force=False):
+        if not hasattr(self, "quick_product_suggestions"):return
+        if force:self.quick_product_suggestions_collapsed=False
+        self.quick_product_suggestions_toggle.configure(image=self.icons["expand" if self.quick_product_suggestions_collapsed else "collapse"])
+        if self.quick_product_suggestions_collapsed:
+            self.quick_product_suggestions.pack_forget();return
+        for child in self.quick_product_suggestions.winfo_children():child.destroy()
+        results=self.quick_product_results(self.quick_product.get())
+        if not results:
+            ctk.CTkLabel(self.quick_product_suggestions,text="Nenhum produto encontrado",height=38,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(fill="x",padx=10,pady=4)
+        else:
+            for product in results[:SEARCH_RESULT_LIMIT]:
+                label=f"{self.movement_product_display(product)}  •  Saldo: {fmt_number(product['stock'])} {product['unit']}"
+                ctk.CTkButton(self.quick_product_suggestions,text=label,anchor="w",height=36,corner_radius=6,fg_color="transparent",hover_color=COLORS["accent_soft"],text_color=COLORS["text"],command=lambda product_id=int(product["id"]):self.select_quick_product(product_id)).pack(fill="x",padx=5,pady=2)
+            if len(results)>SEARCH_RESULT_LIMIT:ctk.CTkLabel(self.quick_product_suggestions,text=f"Mostrando {SEARCH_RESULT_LIMIT} de {len(results)}. Continue digitando para filtrar.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",9)).pack(pady=5)
+        self.quick_product_suggestions.pack(fill="x",pady=(0,10),before=self.quick_current.master)
+
+    def on_quick_product_search(self, event=None):
+        if event and event.keysym in ("Return", "Escape"):
+            if event.keysym=="Escape":self.hide_quick_product_suggestions()
+            return
+        selected=self.db.product(self.quick_selected_product_id) if self.quick_selected_product_id else None
+        if not selected or self.quick_product.get()!=self.movement_product_display(selected):self.quick_selected_product_id=None;self.update_quick_current()
+        self.schedule_ui_task("quick_product_search",lambda:self.show_quick_product_suggestions(force=True),70)
+
+    def select_first_quick_product(self):
+        results=self.quick_product_results(self.quick_product.get())
+        if results:self.select_quick_product(int(results[0]["id"]));self.quick_register_button.focus_set()
+
+    def select_quick_product(self, product_id):
+        self.cancel_ui_task("quick_product_search")
+        product=self.db.product(int(product_id))
+        if not product:return
+        self.quick_selected_product_id=int(product_id);self.quick_product.set(self.movement_product_display(product));self.hide_quick_product_suggestions();self.update_quick_current()
+
+    def update_quick_current(self):
+        if not hasattr(self, "quick_current"):return
+        product=self.db.product(self.quick_selected_product_id) if self.quick_selected_product_id else None
+        self.quick_current.configure(text=f"Saldo atual: {fmt_number(product['stock'])} {product['unit']}" if product else "Saldo atual: —")
+
+    def on_quick_action_change(self, _value=None):
+        if not hasattr(self, "quick_register_button"):return
+        action=self.quick_action.get();definition=QUICK_STOCK_ACTIONS.get(action,QUICK_STOCK_ACTIONS["Defeito"]);delta=definition[2]
+        color=COLORS["danger"] if delta<0 else COLORS["success"]
+        signal="−1" if delta<0 else "+1"
+        self.quick_register_button.configure(text=f"Registrar {action.lower()} ({signal} unidade)",fg_color=color,hover_color=color)
+        self.save_interface_state()
+
+    def register_quick_stock_movement(self):
+        product_id=self.quick_selected_product_id
+        if not product_id:
+            results=self.quick_product_results(self.quick_product.get())
+            if len(results)==1:product_id=int(results[0]["id"]);self.select_quick_product(product_id)
+            else:messagebox.showwarning(APP_NAME,"Escolha um produto na lista de resultados.",parent=self);self.show_quick_product_suggestions(force=True);return
+        responsible=self.quick_user.get().strip()
+        if responsible not in self.user_names():messagebox.showwarning(APP_NAME,"Selecione um usuário cadastrado como responsável.",parent=self);return
+        action=self.quick_action.get();product=self.db.product(product_id)
+        try:self.db.add_quick_stock_movement(action,product_id,date.today().isoformat(),responsible)
+        except ValueError as error:messagebox.showwarning(APP_NAME,str(error),parent=self);return
+        updated=self.db.product(product_id);signal="−1" if QUICK_STOCK_ACTIONS[action][2]<0 else "+1";result_color=COLORS["danger"] if action=="Defeito" else COLORS["success"]
+        self.settings["quick_stock_action"]=action;self.settings["quick_stock_user"]=responsible;self.save_settings();self.refresh_all()
+        self.quick_status.configure(text=f"{action} registrado: {product_label(product)}  •  {signal} unidade  •  novo saldo {fmt_number(updated['stock'])} {updated['unit']}",text_color=result_color)
+        self.reset_quick_product_search()
+
+    def reset_quick_product_search(self):
+        self.quick_selected_product_id=None;self.quick_product.set("");self.hide_quick_product_suggestions();self.update_quick_current();self.after_idle(self.quick_product_entry.focus_set)
+
+    def refresh_defect_return_page(self):
+        if not hasattr(self, "quick_product_entry"):return
+        self.refresh_user_controls()
+        if self.quick_selected_product_id and not self.db.product(self.quick_selected_product_id):self.reset_quick_product_search()
+        else:self.update_quick_current()
 
     def count_page(self):
         page=ctk.CTkFrame(self.content,fg_color="transparent");PageTitle(page,"Contagem","Faça o check-in físico do estoque e recupere a confiança dos saldos.").pack(fill="x",pady=(0,18))
@@ -3032,6 +3247,9 @@ class EstoqueApp(ctk.CTk):
         if hasattr(self,"c_responsible_menu"):
             self.c_responsible_menu.configure(values=values)
             if self.c_responsible.get() not in names:self.c_responsible.set(names[0] if names else values[0])
+        if hasattr(self,"quick_user_menu"):
+            self.quick_user_menu.configure(values=values)
+            if self.quick_user.get() not in names:self.quick_user.set(names[0] if names else values[0])
     def refresh_operation_controls(self):
         active = self.operation_map()
         if hasattr(self, "m_operation_menu"):
@@ -3357,8 +3575,10 @@ class EstoqueApp(ctk.CTk):
     def refresh_all(self):
         """Refresh only the visible page; hidden pages update when opened."""
         self.db.ensure_kit_operations()
-        refresh={"registration":lambda:None,"stock":self.refresh_stock,"movements":self.refresh_movement_page,"kit_conversion":self.refresh_kit_conversion,"simulation":self.refresh_simulation_page,"count":self.refresh_counts,"settings":lambda:None}.get(self.current_page)
-        if refresh:refresh()
+        refresh_name={"stock":"refresh_stock","movements":"refresh_movement_page","defect_return":"refresh_defect_return_page","kit_conversion":"refresh_kit_conversion","simulation":"refresh_simulation_page","count":"refresh_counts"}.get(self.current_page)
+        if refresh_name:
+            refresh=getattr(self,refresh_name,None)
+            if refresh:refresh()
     def close(self):
         try:
             state = self.state()

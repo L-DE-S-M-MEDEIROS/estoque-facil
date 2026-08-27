@@ -20,6 +20,8 @@ UI_DEFAULTS: dict[str, Any] = {
     "movement_operation": "Entrada",
     "movement_user": "",
     "movement_section": "new",
+    "quick_stock_action": "Defeito",
+    "quick_stock_user": "",
     "kit_conversion_mode": "Montagem",
     "kit_conversion_user": "",
     "history_filter": "Todas as operações",
@@ -64,7 +66,7 @@ def sanitize_preferences(values: dict[str, Any]) -> dict[str, Any]:
     clean["theme"] = values.get("theme") if values.get("theme") in ("Light", "Dark") else "Light"
     clean["window_state"] = values.get("window_state") if values.get("window_state") in ("normal", "zoomed") else "zoomed"
     clean["window_geometry"] = _text(values.get("window_geometry"), maximum=80)
-    clean["last_page"] = values.get("last_page") if values.get("last_page") in ("stock", "movements", "kit_conversion", "simulation", "count", "registration", "settings") else "stock"
+    clean["last_page"] = values.get("last_page") if values.get("last_page") in ("stock", "movements", "defect_return", "kit_conversion", "simulation", "count", "registration", "settings") else "stock"
     clean["counter_name"] = _text(values.get("counter_name"), maximum=100)
     clean["stock_search"] = _text(values.get("stock_search"))
     clean["count_search"] = _text(values.get("count_search"))
@@ -74,6 +76,8 @@ def sanitize_preferences(values: dict[str, Any]) -> dict[str, Any]:
     clean["movement_operation"] = _text(values.get("movement_operation"), "Entrada", 100) or "Entrada"
     clean["movement_user"] = _text(values.get("movement_user"), maximum=100)
     clean["movement_section"] = values.get("movement_section") if values.get("movement_section") in ("new", "history") else "new"
+    clean["quick_stock_action"] = values.get("quick_stock_action") if values.get("quick_stock_action") in ("Defeito", "Devolução") else "Defeito"
+    clean["quick_stock_user"] = _text(values.get("quick_stock_user"), maximum=100)
     saved_kit_mode = values.get("kit_conversion_mode")
     clean["kit_conversion_mode"] = "Desmontagem" if saved_kit_mode in ("Desmontagem", "Desmembramento") else "Montagem"
     clean["kit_conversion_user"] = _text(values.get("kit_conversion_user"), maximum=100)

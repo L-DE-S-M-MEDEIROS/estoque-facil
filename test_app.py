@@ -138,6 +138,31 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.db.add_movement(product_id, "inventario", 12, date.today().isoformat(), "Contagem", "Teste")
         self.assertEqual(self.db.stock(product_id), 12)
 
+    def test_quick_defect_and_return_always_move_exactly_one_unit(self):
+        product_id = self.create_product()
+        self.db.save_operation("DEFEITO", "negative")
+        self.db.save_operation("DEVOLUÇÃO", "positive")
+        self.db.add_movement(product_id, "inventario", 5, "2026-08-26", "Inicial", "Ana")
+
+        defect_batch = self.db.add_quick_stock_movement("Defeito", product_id, "2026-08-27", "Ana")
+        self.assertEqual(self.db.stock(product_id), 4)
+        self.assertEqual(float(self.db.movement_batch_items(defect_batch)[0]["quantity"]), -1)
+
+        return_batch = self.db.add_quick_stock_movement("Devolução", product_id, "2026-08-27", "Bruno")
+        self.assertEqual(self.db.stock(product_id), 5)
+        self.assertEqual(float(self.db.movement_batch_items(return_batch)[0]["quantity"]), 1)
+        history = {row["history_key"]: row for row in self.db.movement_history()}
+        self.assertEqual(history[f"batch:{defect_batch}"]["operation_name"], "DEFEITO")
+        self.assertEqual(history[f"batch:{return_batch}"]["operation_name"], "DEVOLUÇÃO")
+
+    def test_quick_stock_movement_requires_the_expected_operation_effect(self):
+        product_id = self.create_product()
+        self.db.save_operation("DEFEITO", "positive")
+        with self.assertRaisesRegex(ValueError, "efeito negativo"):
+            self.db.add_quick_stock_movement("Defeito", product_id, "2026-08-27", "Ana")
+        with self.assertRaisesRegex(ValueError, "Cadastre ou reative"):
+            self.db.add_quick_stock_movement("Devolução", product_id, "2026-08-27", "Ana")
+
     def test_relative_count_dates(self):
         today = date(2026, 8, 20)
         self.assertEqual(app.relative_past_date(today.isoformat(), today), "Hoje")
@@ -496,6 +521,21 @@ class LocalStateTests(unittest.TestCase):
         self.assertEqual(restored["kit_conversion_mode"], "Desmontagem")
         self.assertEqual(restored["kit_conversion_user"], "Ana")
 
+    def test_quick_stock_page_action_and_user_are_restored(self):
+        path = self.folder / "ui-preferences.json"
+        preferences = LocalPreferences(path)
+        preferences.values.update({
+            "last_page": "defect_return",
+            "quick_stock_action": "Devolução",
+            "quick_stock_user": "Cristian",
+        })
+        preferences.save()
+
+        restored = LocalPreferences(path).values
+        self.assertEqual(restored["last_page"], "defect_return")
+        self.assertEqual(restored["quick_stock_action"], "Devolução")
+        self.assertEqual(restored["quick_stock_user"], "Cristian")
+
     def test_movement_internal_page_is_restored(self):
         path = self.folder / "ui-preferences.json"
         preferences = LocalPreferences(path)
@@ -539,6 +579,43 @@ class CountFlowTests(unittest.TestCase):
 
         self.assertIsNone(screen.c_selected_product_id)
         self.assertEqual(screen.c_product.value, "")
+        self.assertEqual(calls, ["hide", "balance", "scheduled", "focus"])
+
+
+class QuickStockFlowTests(unittest.TestCase):
+    def test_successful_quick_movement_reset_clears_search_and_restores_focus(self):
+        calls = []
+
+        class Value:
+            value = "FITA 5 PEÇAS • MARINHO [un]"
+
+            def set(self, value):
+                self.value = value
+
+        class Entry:
+            def focus_set(self):
+                calls.append("focus")
+
+        class Screen:
+            quick_selected_product_id = 27
+            quick_product = Value()
+            quick_product_entry = Entry()
+
+            def hide_quick_product_suggestions(self):
+                calls.append("hide")
+
+            def update_quick_current(self):
+                calls.append("balance")
+
+            def after_idle(self, callback):
+                calls.append("scheduled")
+                callback()
+
+        screen = Screen()
+        app.EstoqueApp.reset_quick_product_search(screen)
+
+        self.assertIsNone(screen.quick_selected_product_id)
+        self.assertEqual(screen.quick_product.value, "")
         self.assertEqual(calls, ["hide", "balance", "scheduled", "focus"])
 
 
