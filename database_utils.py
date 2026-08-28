@@ -31,3 +31,18 @@ def configure_database_connection(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA busy_timeout=5000")
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA synchronous=NORMAL")
+
+
+def database_integrity_errors(connection: sqlite3.Connection) -> list[str]:
+    """Return concise SQLite integrity errors without mutating the database."""
+
+    errors = [
+        str(row[0])
+        for row in connection.execute("PRAGMA quick_check")
+        if str(row[0]).lower() != "ok"
+    ]
+    errors.extend(
+        f"chave estrangeira inválida em {row[0]} (linha {row[1]})"
+        for row in connection.execute("PRAGMA foreign_key_check")
+    )
+    return errors

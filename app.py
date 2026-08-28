@@ -27,15 +27,15 @@ from xml.sax.saxutils import escape as xml_escape
 from premium_icons import app_icon, application_icon_path, brand_mark, icon
 from premium_widgets import MaskedDateEntry, SmoothScrollableFrame, TreeConfidenceOverlay, TreeRelativeDateOverlay, TreeRowSeparatorOverlay, TreeStockOverlay, confidence_tier, tree_wheel_units
 from cloud_sync import CloudSync, CloudSyncError
-from database_utils import configure_database_connection, normalize_identity_text
+from database_utils import configure_database_connection, database_integrity_errors, normalize_identity_text
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
 from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.4"
+APP_VERSION = "1.2.5"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
-SEARCH_RESULT_LIMIT = 36
+SEARCH_RESULT_LIMIT = 18
 
 KIT_PIECE_COUNTS = (2, 4, 5)
 KIT_INTERNAL_OPERATIONS = {
@@ -159,6 +159,40 @@ def visible_window_geometry(
     height = min(max(height, minimum_height), bottom - top)
     x = min(max(x, left), right - width)
     y = min(max(y, top), bottom - height)
+    return f"{width}x{height}{x:+d}{y:+d}"
+
+
+def centered_dialog_geometry(
+    parent: tk.Misc,
+    desired_width: int,
+    desired_height: int,
+    margin: int = 24,
+) -> str:
+    """Fit and center a dialog inside the work area containing its parent."""
+
+    fallback = [(0, 0, parent.winfo_screenwidth(), parent.winfo_screenheight())]
+    work_areas = getattr(parent, "work_areas", fallback) or fallback
+    try:
+        parent.update_idletasks()
+        center_x = parent.winfo_rootx() + max(1, parent.winfo_width()) // 2
+        center_y = parent.winfo_rooty() + max(1, parent.winfo_height()) // 2
+    except tk.TclError:
+        center_x = (work_areas[0][0] + work_areas[0][2]) // 2
+        center_y = (work_areas[0][1] + work_areas[0][3]) // 2
+    target = next(
+        (area for area in work_areas if area[0] <= center_x < area[2] and area[1] <= center_y < area[3]),
+        work_areas[0],
+    )
+    left, top, right, bottom = target
+    # Tk's geometry describes the client area. Reserve the native Windows frame,
+    # title bar and a small safety strip so the bottom actions never sit behind
+    # the taskbar on short displays.
+    available_width = max(320, right - left - margin * 2 - 16)
+    available_height = max(280, bottom - top - margin * 2 - 136)
+    width = min(max(320, int(desired_width)), available_width)
+    height = min(max(280, int(desired_height)), available_height)
+    x = left + (right - left - width) // 2
+    y = top + (bottom - top - height) // 2
     return f"{width}x{height}{x:+d}{y:+d}"
 
 
@@ -506,6 +540,13 @@ class Database:
             self.db.execute("ALTER TABLE movements ADD COLUMN operation_id INTEGER REFERENCES operation_types(id)")
         if "batch_id" not in movement_columns:
             self.db.execute("ALTER TABLE movements ADD COLUMN batch_id INTEGER REFERENCES movement_batches(id)")
+        self.db.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_movement_batches_operation ON movement_batches(operation_id);
+            CREATE INDEX IF NOT EXISTS idx_movements_batch ON movements(batch_id);
+            CREATE INDEX IF NOT EXISTS idx_movements_operation ON movements(operation_id);
+            CREATE INDEX IF NOT EXISTS idx_movements_product_timeline
+                ON movements(product_id,movement_date,created_at,id);
+        """)
         created_at = datetime.now().isoformat(timespec="seconds")
         for name, effect, legacy_type in (
             ("Entrada", "positive", "entrada"),
@@ -524,11 +565,38 @@ class Database:
             WHERE legacy_type='kit_disassembly' AND name<>'Desmontagem de kits'""")
         self.db.commit()
         self.on_change = None
+        self._products_cache: tuple[sqlite3.Row, ...] | None = None
+        self._products_cache_data_version: int | None = None
+        self._products_by_id: dict[int, sqlite3.Row] = {}
         self.db.set_trace_callback(self._track_change)
 
     def _track_change(self, statement: str) -> None:
-        if self.on_change and re.match(r"^\s*(INSERT|UPDATE|DELETE)\b", statement, re.IGNORECASE):
+        if not re.match(r"^\s*(INSERT|UPDATE|DELETE)\b", statement, re.IGNORECASE):
+            return
+        self.invalidate_caches()
+        if self.on_change:
             self.on_change()
+
+    def invalidate_caches(self) -> None:
+        self._products_cache = None
+        self._products_cache_data_version = None
+        self._products_by_id = {}
+
+    def _database_data_version(self) -> int:
+        return int(self.db.execute("PRAGMA data_version").fetchone()[0])
+
+    def _cached_products(self) -> tuple[sqlite3.Row, ...]:
+        data_version = self._database_data_version()
+        if self._products_cache is None or self._products_cache_data_version != data_version:
+            rows = self.db.execute("""SELECT p.*,COALESCE(SUM(m.quantity),0) stock
+                FROM products p LEFT JOIN movements m ON m.product_id=p.id
+                GROUP BY p.id ORDER BY
+                    CASE WHEN TRIM(COALESCE(p.group_name,''))='' THEN 1 ELSE 0 END,
+                    p.group_name COLLATE NOCASE,p.name COLLATE NOCASE,p.variant COLLATE NOCASE""").fetchall()
+            self._products_cache = tuple(rows)
+            self._products_by_id = {int(row["id"]): row for row in rows}
+            self._products_cache_data_version = data_version
+        return self._products_cache
 
     def ensure_kit_operations(self) -> bool:
         """Restore internal conversion operations after importing an older cloud snapshot."""
@@ -660,13 +728,9 @@ class Database:
             self.db.execute("UPDATE users SET active=0 WHERE id=?", (user_id,))
 
     def products(self, search: str = "") -> list[sqlite3.Row]:
-        term = f"%{search.strip()}%"
-        return self.db.execute("""SELECT p.*,COALESCE(SUM(m.quantity),0) stock
-            FROM products p LEFT JOIN movements m ON m.product_id=p.id
-            WHERE p.name LIKE ? OR p.category LIKE ? OR p.group_name LIKE ? OR p.variant LIKE ?
-            GROUP BY p.id ORDER BY
-                CASE WHEN TRIM(COALESCE(p.group_name,''))='' THEN 1 ELSE 0 END,
-                p.group_name COLLATE NOCASE,p.name COLLATE NOCASE,p.variant COLLATE NOCASE""", (term, term, term, term)).fetchall()
+        rows = self._cached_products()
+        query = search.strip()
+        return [row for row in rows if product_matches_search(row, query)] if query else list(rows)
 
     def groups(self) -> list[str]:
         return [row["name"] for row in self.db.execute("SELECT name FROM product_groups WHERE active=1 ORDER BY name COLLATE NOCASE")]
@@ -714,8 +778,8 @@ class Database:
             self.db.execute("UPDATE product_groups SET active=0 WHERE id=?", (group_id,))
 
     def product(self, product_id: int) -> sqlite3.Row | None:
-        return self.db.execute("""SELECT p.*,COALESCE(SUM(m.quantity),0) stock
-            FROM products p LEFT JOIN movements m ON m.product_id=p.id WHERE p.id=? GROUP BY p.id""", (product_id,)).fetchone()
+        self._cached_products()
+        return self._products_by_id.get(int(product_id))
 
     def duplicate_product(self, name: str, group_name: str, product_id: int | None = None) -> sqlite3.Row | None:
         query = """SELECT id,name,group_name FROM products
@@ -1328,7 +1392,35 @@ class Database:
         self.db.commit(); shutil.copy2(self.path, target)
 
     def restore(self, source: Path) -> None:
-        self.db.close(); shutil.copy2(source, self.path); self.__init__()
+        try:
+            candidate = sqlite3.connect(f"file:{source.resolve().as_posix()}?mode=ro", uri=True)
+        except sqlite3.Error as error:
+            raise ValueError("O arquivo escolhido não é um banco de dados SQLite válido.") from error
+        try:
+            core_tables = {
+                str(row[0])
+                for row in candidate.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if not {"products", "movements"}.issubset(core_tables):
+                raise ValueError("O arquivo escolhido não é um backup válido do Estoque Bolsas Baby.")
+            errors = database_integrity_errors(candidate)
+            if errors:
+                raise ValueError("O backup está corrompido: " + "; ".join(errors[:3]))
+        except sqlite3.Error as error:
+            raise ValueError("O arquivo escolhido não é um banco de dados SQLite válido.") from error
+        finally:
+            candidate.close()
+        safety_backup = self.path.with_name(f"antes-da-restauracao-{datetime.now():%Y%m%d-%H%M%S}.db")
+        self.db.commit()
+        shutil.copy2(self.path, safety_backup)
+        self.db.close()
+        try:
+            shutil.copy2(source, self.path)
+            self.__init__()
+        except Exception:
+            shutil.copy2(safety_backup, self.path)
+            self.__init__()
+            raise
 
 class Card(ctk.CTkFrame):
     def __init__(self, master, **kwargs):
@@ -1550,10 +1642,13 @@ class SkuMappingEditorDialog(BrandedToplevel):
         super().__init__(parent, fg_color=COLORS["background"])
         self.parent = parent; self.mapping_id = mapping_id; self.result: int | None = None
         self.title("Vincular SKU a produtos")
-        scale = parent.ui_scale; width, height = round(820*scale), round(620*scale)
-        self.geometry(f"{width}x{height}+{parent.winfo_x()+70}+{parent.winfo_y()+45}")
-        self.minsize(round(680*scale), round(500*scale)); self.transient(parent); self.grab_set()
+        scale = parent.ui_scale; width, height = round(820*scale), round(560*scale)
+        geometry = centered_dialog_geometry(parent, width, height)
+        fitted = parse_window_geometry(geometry)
+        self.geometry(geometry)
+        self.minsize(min(round(680*scale), fitted[0]), min(round(440*scale), fitted[1])); self.transient(parent); self.grab_set()
         self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(1, weight=1)
+        self.bind("<Escape>", lambda _event: self.destroy())
 
         mapping = parent.db.sku_mapping(mapping_id) if mapping_id else None
         current_products = parent.db.sku_mapping_products(mapping_id) if mapping_id else []
@@ -1563,27 +1658,30 @@ class SkuMappingEditorDialog(BrandedToplevel):
         self._search_job = None
 
         header = ctk.CTkFrame(self, fg_color=COLORS["surface"], corner_radius=0); header.grid(row=0, column=0, sticky="ew")
-        ctk.CTkLabel(header, text="MEMÓRIA DE SKU", text_color=COLORS["accent"], font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=28,pady=(18,2))
-        ctk.CTkLabel(header, text="Escolha os produtos descontados", text_color=COLORS["text"], font=ctk.CTkFont("Inter",22,"bold")).pack(anchor="w",padx=28)
+        ctk.CTkLabel(header, text="MEMÓRIA DE SKU", text_color=COLORS["accent"], font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=28,pady=(13,2))
+        ctk.CTkLabel(header, text="Escolha os produtos descontados", text_color=COLORS["text"], font=ctk.CTkFont("Inter",21,"bold")).pack(anchor="w",padx=28)
         subtitle = context or "Cada unidade vendida deste SKU descontará uma unidade de cada produto marcado."
-        ctk.CTkLabel(header, text=subtitle, text_color=COLORS["muted"], font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=28,pady=(5,18))
+        ctk.CTkLabel(header, text=subtitle, wraplength=max(440, fitted[0]-70), justify="left", text_color=COLORS["muted"], font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=28,pady=(4,13))
 
-        content = ctk.CTkFrame(self, fg_color="transparent"); content.grid(row=1,column=0,sticky="nsew",padx=24,pady=20); content.grid_columnconfigure(0,weight=1); content.grid_rowconfigure(2,weight=1)
-        sku_row = ctk.CTkFrame(content,fg_color="transparent"); sku_row.grid(row=0,column=0,sticky="ew",pady=(0,12)); sku_row.grid_columnconfigure(0,weight=1)
+        content = ctk.CTkFrame(self, fg_color="transparent"); content.grid(row=1,column=0,sticky="nsew",padx=24,pady=14); content.grid_columnconfigure(0,weight=1); content.grid_rowconfigure(3,weight=1)
+        sku_card = Card(content); sku_card.grid(row=0,column=0,sticky="ew",pady=(0,12)); sku_card.grid_columnconfigure(0,weight=1)
+        ctk.CTkLabel(sku_card,text="SKU encontrado na lista" if locked_sku else "SKU de venda",anchor="w",text_color=COLORS["text"],font=ctk.CTkFont("Inter",11,"bold")).grid(row=0,column=0,sticky="ew",padx=16,pady=(12,5))
         self.sku = tk.StringVar(value=str(mapping["sku"] if mapping else sku))
-        self.sku_entry = ctk.CTkEntry(sku_row,textvariable=self.sku,height=42,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface"])
-        self.sku_entry.grid(row=0,column=0,sticky="ew")
+        self.sku_entry = ctk.CTkEntry(sku_card,textvariable=self.sku,height=42,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface_alt"])
+        self.sku_entry.grid(row=1,column=0,sticky="ew",padx=16,pady=(0,6))
+        ctk.CTkLabel(sku_card,text="Marque abaixo todos os produtos que compõem uma unidade deste SKU.",anchor="w",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",9)).grid(row=2,column=0,sticky="ew",padx=16,pady=(0,12))
         if locked_sku:self.sku_entry.configure(state="disabled")
+        ctk.CTkLabel(content,text="Produtos vinculados",anchor="w",text_color=COLORS["text"],font=ctk.CTkFont("Inter",12,"bold")).grid(row=1,column=0,sticky="ew",pady=(0,6))
         self.search = ctk.CTkEntry(content,placeholder_text="Buscar produto, grupo, variação ou categoria...",height=40,corner_radius=9,border_color=COLORS["border"],fg_color=COLORS["surface"])
-        self.search.grid(row=1,column=0,sticky="ew",pady=(0,10)); self.search.bind("<KeyRelease>",self.schedule_product_refresh)
-        product_card=Card(content);product_card.grid(row=2,column=0,sticky="nsew");product_card.grid_columnconfigure(0,weight=1);product_card.grid_rowconfigure(1,weight=1)
+        self.search.grid(row=2,column=0,sticky="ew",pady=(0,10)); self.search.bind("<KeyRelease>",self.schedule_product_refresh)
+        product_card=Card(content);product_card.grid(row=3,column=0,sticky="nsew");product_card.grid_columnconfigure(0,weight=1);product_card.grid_rowconfigure(1,weight=1)
         self.selection_status=ctk.CTkLabel(product_card,text="",anchor="w",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10,"bold"));self.selection_status.grid(row=0,column=0,columnspan=2,sticky="ew",padx=14,pady=(10,6))
-        self.product_tree=parent.table(product_card,("selected","product","stock"),("Selecionado","Produto","Saldo"),(90,510,120));self.product_tree.configure(selectmode="none");self.product_tree.column("product",anchor="w");self.product_tree.grid(row=1,column=0,sticky="nsew",padx=(10,0),pady=(0,10));self.product_tree.bind("<Button-1>",self.toggle_product,add="+")
+        self.product_tree=parent.table(product_card,("selected","product","stock"),("Selecionado","Produto","Saldo"),(90,510,120));self.product_tree.configure(selectmode="none",height=3);self.product_tree.column("product",anchor="w");self.product_tree.grid(row=1,column=0,sticky="nsew",padx=(10,0),pady=(0,10));self.product_tree.bind("<Button-1>",self.toggle_product,add="+")
         product_scrollbar=ctk.CTkScrollbar(product_card,orientation="vertical",command=self.product_tree.yview,button_color=COLORS["accent"],button_hover_color=COLORS["accent_hover"]);product_scrollbar.grid(row=1,column=1,sticky="ns",padx=(6,10),pady=(0,10));self.product_tree.configure(yscrollcommand=product_scrollbar.set)
-        actions=ctk.CTkFrame(content,fg_color="transparent");actions.grid(row=3,column=0,sticky="ew",pady=(14,0))
+        actions=ctk.CTkFrame(content,fg_color="transparent");actions.grid(row=4,column=0,sticky="ew",pady=(14,0))
         ctk.CTkButton(actions,text="Cancelar",width=105,height=40,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.destroy).pack(side="left")
         ctk.CTkButton(actions,text="Salvar vínculo",width=160,height=40,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.save).pack(side="right")
-        self.refresh_products()
+        self.refresh_products(); self.after_idle(self.search.focus_set if locked_sku else self.sku_entry.focus_set)
 
     def refresh_products(self):
         self._search_job=None;self.product_tree.delete(*self.product_tree.get_children());query=self.search.get().strip();visible=0
@@ -1674,17 +1772,22 @@ class SkuManagerDialog(BrandedToplevel):
 class SalesListReviewDialog(BrandedToplevel):
     def __init__(self,parent:"EstoqueApp",source_label:str,file_name:str,items):
         super().__init__(parent,fg_color=COLORS["background"]);self.parent=parent;self.items=items;self.result=False;self.title(f"Conferir lista {source_label}")
-        scale=parent.ui_scale;width,height=round(1020*scale),round(700*scale);self.geometry(f"{width}x{height}+{parent.winfo_x()+35}+{parent.winfo_y()+25}");self.minsize(round(820*scale),round(570*scale));self.transient(parent);self.grab_set();self.grid_columnconfigure(0,weight=1);self.grid_rowconfigure(1,weight=1)
+        scale=parent.ui_scale;width,height=round(1020*scale),round(600*scale);geometry=centered_dialog_geometry(parent,width,height);fitted=parse_window_geometry(geometry);self.geometry(geometry);self.minsize(min(round(820*scale),fitted[0]),min(round(500*scale),fitted[1]));self.transient(parent);self.grab_set();self.grid_columnconfigure(0,weight=1);self.grid_rowconfigure(1,weight=1);self.bind("<Escape>",lambda _event:self.destroy())
         header=ctk.CTkFrame(self,fg_color=COLORS["surface"],corner_radius=0);header.grid(row=0,column=0,sticky="ew")
-        ctk.CTkLabel(header,text=f"LISTA {source_label.upper()}",text_color=COLORS["accent"],font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=28,pady=(18,2));ctk.CTkLabel(header,text="Confira antes de levar para Movimentações",text_color=COLORS["text"],font=ctk.CTkFont("Inter",22,"bold")).pack(anchor="w",padx=28)
-        ctk.CTkLabel(header,text=file_name,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=28,pady=(5,18))
-        content=ctk.CTkFrame(self,fg_color="transparent");content.grid(row=1,column=0,sticky="nsew",padx=24,pady=18);content.grid_columnconfigure(0,weight=1);content.grid_rowconfigure((1,3),weight=1)
-        sku_bar=ctk.CTkFrame(content,fg_color="transparent");sku_bar.grid(row=0,column=0,sticky="ew",pady=(0,8));ctk.CTkLabel(sku_bar,text="Leitura por SKU",text_color=COLORS["text"],font=ctk.CTkFont("Inter",14,"bold")).pack(side="left")
+        ctk.CTkLabel(header,text=f"LISTA {source_label.upper()}",text_color=COLORS["accent"],font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=28,pady=(13,2));ctk.CTkLabel(header,text="Confira antes de levar para Movimentações",text_color=COLORS["text"],font=ctk.CTkFont("Inter",21,"bold")).pack(anchor="w",padx=28)
+        ctk.CTkLabel(header,text=f"Arquivo: {file_name}",wraplength=max(500,fitted[0]-70),justify="left",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=28,pady=(4,13))
+        content=ctk.CTkFrame(self,fg_color="transparent");content.grid(row=1,column=0,sticky="nsew",padx=24,pady=12);content.grid_columnconfigure(0,weight=1);content.grid_rowconfigure((2,4),weight=1)
+        summary_card=Card(content);summary_card.grid(row=0,column=0,sticky="ew",pady=(0,12));self.summary_label=ctk.CTkLabel(summary_card,text="",anchor="w",text_color=COLORS["text"],font=ctk.CTkFont("Inter",11,"bold"));self.summary_label.pack(fill="x",padx=16,pady=11)
+        sku_bar=ctk.CTkFrame(content,fg_color="transparent");sku_bar.grid(row=1,column=0,sticky="ew",pady=(0,8));ctk.CTkLabel(sku_bar,text="1. SKUs identificados",text_color=COLORS["text"],font=ctk.CTkFont("Inter",14,"bold")).pack(side="left")
         ctk.CTkButton(sku_bar,text="Alterar vínculo selecionado",image=parent.icons["edit"],height=34,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.edit_mapping).pack(side="right")
-        self.sku_tree=parent.table(content,("sku","quantity","products"),("SKU","Qnt. da lista","Produtos descontados"),(270,110,560));self.sku_tree.column("products",anchor="w");self.sku_tree.grid(row=1,column=0,sticky="nsew")
-        ctk.CTkLabel(content,text="Baixa consolidada por produto",text_color=COLORS["text"],font=ctk.CTkFont("Inter",14,"bold")).grid(row=2,column=0,sticky="w",pady=(14,8))
-        self.product_tree=parent.table(content,("product","quantity","current","after"),("Produto","Quantidade a descontar","Saldo atual","Saldo depois"),(500,160,130,130));self.product_tree.column("product",anchor="w");self.product_tree.grid(row=3,column=0,sticky="nsew")
-        actions=ctk.CTkFrame(content,fg_color="transparent");actions.grid(row=4,column=0,sticky="ew",pady=(14,0));ctk.CTkButton(actions,text="Cancelar",width=105,height=40,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.destroy).pack(side="left")
+        sku_table=ctk.CTkFrame(content,fg_color="transparent");sku_table.grid(row=2,column=0,sticky="nsew");sku_table.grid_columnconfigure(0,weight=1);sku_table.grid_rowconfigure(0,weight=1)
+        self.sku_tree=parent.table(sku_table,("sku","quantity","products"),("SKU","Qnt. da lista","Produtos descontados"),(270,110,560));self.sku_tree.configure(height=2);self.sku_tree.column("products",anchor="w");self.sku_tree.grid(row=0,column=0,sticky="nsew");self.sku_tree.bind("<Double-1>",lambda _event:self.edit_mapping())
+        sku_scrollbar=ctk.CTkScrollbar(sku_table,orientation="vertical",command=self.sku_tree.yview,button_color=COLORS["accent"],button_hover_color=COLORS["accent_hover"]);sku_scrollbar.grid(row=0,column=1,sticky="ns",padx=(7,0));self.sku_tree.configure(yscrollcommand=sku_scrollbar.set)
+        ctk.CTkLabel(content,text="2. Baixa consolidada por produto",text_color=COLORS["text"],font=ctk.CTkFont("Inter",14,"bold")).grid(row=3,column=0,sticky="w",pady=(14,8))
+        product_table=ctk.CTkFrame(content,fg_color="transparent");product_table.grid(row=4,column=0,sticky="nsew");product_table.grid_columnconfigure(0,weight=1);product_table.grid_rowconfigure(0,weight=1)
+        self.product_tree=parent.table(product_table,("product","quantity","current","after"),("Produto","Quantidade a descontar","Saldo atual","Saldo depois"),(500,160,130,130));self.product_tree.configure(height=2);self.product_tree.column("product",anchor="w");self.product_tree.grid(row=0,column=0,sticky="nsew")
+        product_scrollbar=ctk.CTkScrollbar(product_table,orientation="vertical",command=self.product_tree.yview,button_color=COLORS["accent"],button_hover_color=COLORS["accent_hover"]);product_scrollbar.grid(row=0,column=1,sticky="ns",padx=(7,0));self.product_tree.configure(yscrollcommand=product_scrollbar.set)
+        actions=ctk.CTkFrame(content,fg_color="transparent");actions.grid(row=5,column=0,sticky="ew",pady=(14,0));ctk.CTkButton(actions,text="Cancelar",width=105,height=40,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.destroy).pack(side="left")
         ctk.CTkButton(actions,text="Adicionar à movimentação",width=220,height=40,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.confirm).pack(side="right")
         self.refresh()
 
@@ -1694,6 +1797,8 @@ class SalesListReviewDialog(BrandedToplevel):
         for row in self.product_rows:
             product=row["product"];current=float(product["stock"]);after=current-float(row["quantity"])
             self.product_tree.insert("","end",iid=str(row["product_id"]),values=(product_label(product),f"{fmt_number(row['quantity'])} {product['unit']}",f"{fmt_number(current)} {product['unit']}",f"{fmt_number(after)} {product['unit']}"))
+        total_units=sum(float(row["quantity"]) for row in self.product_rows)
+        self.summary_label.configure(text=f"{len(self.review_rows)} SKUs lidos   •   {len(self.product_rows)} produtos   •   {fmt_number(total_units)} unidades para descontar")
 
     def edit_mapping(self):
         selected=self.sku_tree.selection()
@@ -2319,7 +2424,7 @@ class EstoqueApp(ctk.CTk):
         query=self.sim_product.get() if hasattr(self,"sim_product") else ""
         selected=self.db.product(self.sim_selected_product_id) if getattr(self,"sim_selected_product_id",None) else None
         if selected and query==self.movement_product_display(selected):return [selected]
-        return [product for product in self.db.products() if product_matches_search(product,query)]
+        return self.db.products(query)
     def on_simulation_product_search(self):
         selected=self.db.product(self.sim_selected_product_id) if self.sim_selected_product_id else None
         if not selected or self.sim_product.get()!=self.movement_product_display(selected):
@@ -2495,7 +2600,7 @@ class EstoqueApp(ctk.CTk):
         return page
 
     def quick_product_results(self, query=""):
-        return [product for product in self.db.products() if product_matches_search(product, query)]
+        return self.db.products(query)
 
     def hide_quick_product_suggestions(self):
         if hasattr(self, "quick_product_suggestions"):
@@ -2585,9 +2690,11 @@ class EstoqueApp(ctk.CTk):
         cards=ctk.CTkFrame(page,fg_color="transparent");cards.pack(fill="x",pady=(0,16));self.count_cards=[]
         for title in ("A conferir","Conferidos hoje","Diferenças hoje","Confiança média"):
             card=Card(cards,height=92);card.pack(side="left",fill="both",expand=True,padx=(0,12));card.pack_propagate(False);ctk.CTkLabel(card,text=title,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(anchor="w",padx=16,pady=(13,2));label=ctk.CTkLabel(card,text="0",text_color=COLORS["text"],font=ctk.CTkFont("Inter",20,"bold"));label.pack(anchor="w",padx=16);self.count_cards.append(label)
-        body=ctk.CTkFrame(page,fg_color="transparent");body.pack(fill="both",expand=True);body.grid_columnconfigure(1,weight=1);body.grid_rowconfigure(0,weight=1)
+        body=ctk.CTkFrame(page,fg_color="transparent");body.pack(fill="both",expand=True);body.grid_columnconfigure(0,minsize=360);body.grid_columnconfigure(1,weight=1);body.grid_rowconfigure(0,weight=1)
         registered_users=self.user_names();saved_counter=self.settings.get("counter_name","");counter_values=registered_users or ["Cadastre um usuário na aba Cadastro"];selected_counter=saved_counter if saved_counter in registered_users else counter_values[0]
-        form=Card(body,width=360);form.grid(row=0,column=0,sticky="ns",padx=(0,16));form.grid_propagate(False);ctk.CTkLabel(form,text="Novo check-in",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(anchor="w",padx=20,pady=(16,10));self.c_product=tk.StringVar();self.c_quantity=tk.StringVar();self.c_responsible=tk.StringVar(value=selected_counter);self.c_note=tk.StringVar();self.c_selected_product_id: int|None=None;self.count_product_suggestions_collapsed=not self.settings.get("count_products_expanded",False)
+        form_card=Card(body,width=360);form_card.grid(row=0,column=0,sticky="nsew",padx=(0,16));form_card.grid_propagate(False)
+        form=SmoothScrollableFrame(form_card,fg_color="transparent",corner_radius=11,scrollbar_button_color=COLORS["accent"],scrollbar_button_hover_color=COLORS["accent_hover"]);form.pack(fill="both",expand=True,padx=2,pady=2)
+        ctk.CTkLabel(form,text="Novo check-in",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(anchor="w",padx=18,pady=(14,10));self.c_product=tk.StringVar();self.c_quantity=tk.StringVar();self.c_responsible=tk.StringVar(value=selected_counter);self.c_note=tk.StringVar();self.c_selected_product_id: int|None=None;self.count_product_suggestions_collapsed=not self.settings.get("count_products_expanded",False)
         def count_label(text):ctk.CTkLabel(form,text=text,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=20,pady=(0,4))
         count_label("Produto")
         self.c_product_search=ctk.CTkFrame(form,height=42,corner_radius=9,fg_color=COLORS["surface"],border_width=2,border_color=COLORS["accent"]);self.c_product_search.pack(fill="x",padx=20,pady=(0,8));self.c_product_search.grid_columnconfigure(1,weight=1);self.c_product_search.grid_propagate(False)
@@ -2616,7 +2723,7 @@ class EstoqueApp(ctk.CTk):
         return page
 
     def count_product_results(self,query=""):
-        return [product for product in self.db.products() if product_matches_search(product,query)]
+        return self.db.products(query)
 
     def hide_count_product_suggestions(self):
         if hasattr(self,"count_product_suggestions"):
@@ -2853,8 +2960,8 @@ class EstoqueApp(ctk.CTk):
 
     def kit_primary_products(self, query: str = "") -> list[sqlite3.Row]:
         return [
-            product for product in self.db.products()
-            if kit_piece_count(product) in (4, 5) and product_matches_search(product, query)
+            product for product in self.db.products(query)
+            if kit_piece_count(product) in (4, 5)
         ]
 
     def show_kit_product_suggestions(self):
@@ -3195,7 +3302,7 @@ class EstoqueApp(ctk.CTk):
     def product_map(self):return {f"{product_label(p)}  [{p['unit']}]":int(p["id"]) for p in self.db.products()}
     def movement_product_display(self,product):return f"{product_label(product)}  [{product['unit']}]"
     def movement_product_results(self,query=""):
-        return [product for product in self.db.products() if product_matches_search(product,query)]
+        return self.db.products(query)
     def hide_product_suggestions(self):
         if hasattr(self,"product_suggestions"):
             self.product_suggestions.pack_forget();self.product_suggestions_collapsed=True

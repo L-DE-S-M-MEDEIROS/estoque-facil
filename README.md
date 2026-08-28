@@ -25,7 +25,7 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Aba **Estoque atual** com saldo, situação e confiança; a última contagem fica somente na aba **Contagem**
 - Estoque atual agrupado com separadores visuais, produtos em ordem alfabética e saldos coloridos por quantidade
 - Estoque negativo permitido, com aviso persistente por produto e saldo destacado em vinho escuro
-- Aba **Contagem** no formato de check-in da planilha, com busca intuitiva por produto, grupo ou variação, lista resumida de resultados, quantidade física, data e responsável selecionado entre os usuários ativos cadastrados
+- Aba **Contagem** no formato de check-in da planilha, com busca intuitiva por produto, grupo ou variação, lista resumida de resultados, quantidade física, data e responsável selecionado entre os usuários ativos cadastrados; o formulário possui rolagem própria para manter todos os campos acessíveis sem mover a lista ao lado
 - Na lista da Contagem, um clique prepara o produto para conferência e a ação **Editar produto** abre o cadastro do item selecionado
 - Última contagem em tempo relativo e colorido: hoje, dias, semanas, meses ou anos atrás
 - Aba **Cadastro** com gerenciadores separados e ilustrados para Usuários, Operações, Grupos e Produtos
@@ -42,6 +42,7 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Leitura posicional da Lista Shopee, inclusive quando o SKU ocupa mais de uma linha
 - Localização automática das páginas de lista no final de PDFs com etiquetas e notas fiscais do Mercado Livre
 - Memória sincronizada dos vínculos entre cada SKU e um ou mais produtos do estoque
+- Janelas de vínculo e conferência de SKU centralizadas e ajustadas ao monitor disponível, com resumo visual das etapas
 - Conferência por SKU e baixa consolidada por produto antes de levar a lista para Movimentações
 - Gerenciador de SKUs na aba Cadastro para criar, pesquisar, alterar ou excluir vínculos futuros
 - Editor de SKU responsivo com busca curta, tabela virtualizada e seleção de produtos por clique, sem criar dezenas de controles pesados
@@ -49,6 +50,8 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Impressão da Simulação em PDF com uma lista de separação contendo somente produto e quantidade simulada; o estoque atual e o saldo simulado permanecem exclusivos da tela do aplicativo
 - Rascunho da simulação salvo somente no computador do usuário, fora da sincronização do Supabase
 - Pesquisa rápida na movimentação por parte do nome, grupo, variação ou categoria, ignorando diferenças de acento e maiúsculas
+- Aba **Defeito / Devolução** para retirar ou devolver uma unidade rapidamente, com a mesma busca simplificada e limpeza automática após o registro
+- Pesquisas de produto otimizadas com resultado resumido, cache seguro e atualização automática após alterações locais ou sincronizadas
 - Índice de confiança calculado pelos dias, frequência e volume movimentado desde a última contagem
 - Medidores de confiança: vermelho de 0% a 40%, amarelo de 41% a 60%, verde de 61% a 89% e azul de 90% a 100%
 - Mini velocímetros substituem os percentuais nas colunas de confiança das tabelas
@@ -57,6 +60,7 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Campo de data mascarado em `dd/mm/aa` e calendário para seleção com o mouse
 - Histórico completo de movimentações
 - Backup e restauração do banco SQLite
+- Validação de integridade antes de restaurar backups ou aceitar dados e fotos recebidos da nuvem
 - A exclusão geral de todos os dados não fica disponível na interface
 - Verificação automática de atualizações ao abrir, com aviso quando houver uma nova versão
 - Download seguro pelo próprio aplicativo, validação SHA-256, substituição da versão anterior e reinício automático

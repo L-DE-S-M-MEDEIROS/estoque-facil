@@ -74,6 +74,47 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertTrue(app.product_matches_search(product, "matern"))
         self.assertFalse(app.product_matches_search(product, "caramelo"))
 
+    def test_product_snapshot_cache_reuses_query_and_tracks_local_and_external_changes(self):
+        product_id = self.create_product()
+        self.db.invalidate_caches()
+        statements = []
+        self.db.db.set_trace_callback(statements.append)
+        try:
+            self.assertEqual(len(self.db.products()), 1)
+            self.assertEqual(len(self.db.products("4 pec mar")), 1)
+            self.assertEqual(self.db.product(product_id)["name"], "MARINHO")
+        finally:
+            self.db.db.set_trace_callback(self.db._track_change)
+        aggregate_queries = [
+            statement for statement in statements
+            if "FROM products p LEFT JOIN movements" in statement
+        ]
+        self.assertEqual(len(aggregate_queries), 1)
+
+        self.db.add_movement(product_id, "entrada", 3, date.today().isoformat(), "Entrada", "Teste")
+        self.assertEqual(float(self.db.product(product_id)["stock"]), 3)
+
+        external = sqlite3.connect(self.db.path)
+        try:
+            app.configure_database_connection(external)
+            with external:
+                external.execute("UPDATE products SET notes='alterado externamente' WHERE id=?", (product_id,))
+        finally:
+            external.close()
+        self.assertEqual(self.db.product(product_id)["notes"], "alterado externamente")
+
+    def test_database_has_indexes_for_movement_history_and_product_timeline(self):
+        indexes = {
+            str(row[0])
+            for row in self.db.db.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+        self.assertTrue({
+            "idx_movement_batches_operation",
+            "idx_movements_batch",
+            "idx_movements_operation",
+            "idx_movements_product_timeline",
+        }.issubset(indexes))
+
     def test_duplicate_product_in_same_group_is_blocked_after_normalization(self):
         product_id = self.create_product(name="MARÍNHO", group="4 PEÇAS")
         duplicate = {
@@ -398,6 +439,43 @@ class InventoryDatabaseTests(unittest.TestCase):
             sync._download_snapshot(self.db.db, snapshot)
         self.assertEqual(self.db.product(product_id)["name"], "MARINHO")
 
+    def test_cloud_download_rejects_broken_relationships_and_restores_database(self):
+        product_id = self.create_product()
+        self.db.add_movement(product_id, "entrada", 2, "2026-08-27", "Teste", "Ana")
+        sync = CloudSync(app.data_dir(), {})
+        payload = sync.export_payload(self.db.db)
+        payload["tables"]["movements"][0]["product_id"] = 999999
+        snapshot = {"payload": payload, "revision": 2, "updated_at": "2026-08-27T10:00:00+00:00"}
+
+        with self.assertRaisesRegex(CloudSyncError, "verificação de integridade"):
+            sync._download_snapshot(self.db.db, snapshot)
+
+        self.assertEqual(self.db.stock(product_id), 2)
+        self.assertEqual(self.db.db.execute("PRAGMA quick_check").fetchone()[0], "ok")
+        self.assertEqual(self.db.db.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_cloud_download_rejects_invalid_photo_before_changing_data(self):
+        product_id = self.create_product()
+        sync = CloudSync(app.data_dir(), {})
+        payload = sync.export_payload(self.db.db)
+        payload["photos"] = {"produto.png": "conteudo que nao e base64***"}
+        snapshot = {"payload": payload, "revision": 2, "updated_at": "2026-08-27T10:00:00+00:00"}
+
+        with self.assertRaisesRegex(CloudSyncError, "fotos inválidas"):
+            sync._download_snapshot(self.db.db, snapshot)
+
+        self.assertEqual(self.db.product(product_id)["name"], "MARINHO")
+
+    def test_restore_rejects_non_inventory_file_without_replacing_database(self):
+        product_id = self.create_product()
+        invalid = Path(self.temporary_directory.name) / "invalido.db"
+        invalid.write_text("não é sqlite", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "SQLite válido"):
+            self.db.restore(invalid)
+
+        self.assertEqual(self.db.product(product_id)["name"], "MARINHO")
+
     def test_sku_mapping_remembers_multiple_products_and_normalizes_lookup(self):
         first_id = self.create_product(name="BOLSA", variant="Caramelo")
         self.db.save_product({"name":"MOCHILA","category":"Bolsa maternidade","group_name":"2 PEÇAS","variant":"Caramelo","unit":"un","minimum":0,"photo":"","notes":""})
@@ -426,6 +504,38 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertEqual(len(review), 2)
         totals = {row["product_id"]: row["quantity"] for row in draft}
         self.assertEqual(totals, {first_id: 5, second_id: 2})
+
+
+class WindowGeometryTests(unittest.TestCase):
+    def test_dialog_is_centered_and_fitted_to_the_parent_monitor(self):
+        class Parent:
+            work_areas = [(0, 0, 1920, 1040), (1920, 0, 3200, 720)]
+
+            def update_idletasks(self):
+                pass
+
+            def winfo_rootx(self):
+                return 2100
+
+            def winfo_rooty(self):
+                return 80
+
+            def winfo_width(self):
+                return 900
+
+            def winfo_height(self):
+                return 600
+
+            def winfo_screenwidth(self):
+                return 3200
+
+            def winfo_screenheight(self):
+                return 1080
+
+        geometry = app.centered_dialog_geometry(Parent(), 1600, 900, margin=24)
+        width, height, x, y = app.parse_window_geometry(geometry)
+        self.assertEqual((width, height), (1216, 536))
+        self.assertEqual((x, y), (1952, 92))
 
 
 class LocalStateTests(unittest.TestCase):

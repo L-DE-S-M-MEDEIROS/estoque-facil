@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import sqlite3
@@ -11,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from database_utils import register_database_functions
+from database_utils import database_integrity_errors, register_database_functions
 
 
 SUPABASE_URL = "https://raleparpityoscsykssk.supabase.co"
@@ -199,8 +200,20 @@ class CloudSync:
             for row in rows:
                 if not isinstance(row, dict) or not row or not set(row).issubset(allowed_columns[table]):
                     raise CloudSyncError("A cópia na nuvem contém colunas inválidas.")
-        if not isinstance(payload.get("photos", {}), dict):
+        photos = payload.get("photos", {})
+        if not isinstance(photos, dict):
             raise CloudSyncError("A cópia na nuvem contém fotos inválidas.")
+        decoded_photos: dict[str, bytes] = {}
+        try:
+            for name, encoded in photos.items():
+                if not isinstance(name, str) or not name.strip() or not isinstance(encoded, str):
+                    raise ValueError
+                safe_name = Path(name).name
+                if safe_name in decoded_photos:
+                    raise ValueError
+                decoded_photos[safe_name] = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError, binascii.Error) as error:
+            raise CloudSyncError("A cópia na nuvem contém fotos inválidas.") from error
         register_database_functions(connection)
         backup = self.folder / f"antes-da-sincronizacao-{datetime.now():%Y%m%d-%H%M%S}.db"
         connection.commit()
@@ -222,10 +235,18 @@ class CloudSync:
                         placeholders = ",".join("?" for _ in columns)
                         connection.execute(f"INSERT INTO {table} ({','.join(columns)}) VALUES ({placeholders})", tuple(values[c] for c in columns))
             connection.execute("PRAGMA foreign_keys=ON")
+            integrity_errors = database_integrity_errors(connection)
+            if integrity_errors:
+                raise CloudSyncError(
+                    "A cópia na nuvem falhou na verificação de integridade: "
+                    + "; ".join(integrity_errors[:3])
+                )
             photos_folder = self.folder / "fotos"
             photos_folder.mkdir(exist_ok=True)
-            for name, encoded in payload.get("photos", {}).items():
-                (photos_folder / Path(name).name).write_bytes(base64.b64decode(encoded))
+            for name, contents in decoded_photos.items():
+                temporary_photo = photos_folder / f".{name}.{uuid.uuid4().hex}.tmp"
+                temporary_photo.write_bytes(contents)
+                temporary_photo.replace(photos_folder / name)
         except Exception:
             connection.execute("PRAGMA foreign_keys=OFF")
             backup_connection = sqlite3.connect(backup)
