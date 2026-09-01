@@ -27,6 +27,7 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Estoque negativo permitido, com aviso persistente por produto e saldo destacado em vinho escuro
 - Aba **Contagem** no formato de check-in da planilha, com busca intuitiva por produto, grupo ou variação, lista resumida de resultados, quantidade física, data e responsável selecionado entre os usuários ativos cadastrados; o formulário possui rolagem própria para manter todos os campos acessíveis sem mover a lista ao lado
 - Na lista da Contagem, um clique prepara o produto para conferência e a ação **Editar produto** abre o cadastro do item selecionado
+- Botão **Imprimir estoque** na aba Contagem, gerando uma folha completa em PDF com Grupo, Produto, Saldo atual e um campo em branco para a conferência manual
 - Última contagem em tempo relativo e colorido: hoje, dias, semanas, meses ou anos atrás
 - Aba **Cadastro** com gerenciadores separados e ilustrados para Usuários, Operações, Grupos e Produtos
 - Operações padrão e personalizadas visíveis no mesmo gerenciador, com edição e remoção segura
@@ -42,7 +43,7 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - Leitura posicional da Lista Shopee, inclusive quando o SKU ocupa mais de uma linha
 - Localização automática das páginas de lista no final de PDFs com etiquetas e notas fiscais do Mercado Livre
 - Memória sincronizada dos vínculos entre cada SKU e um ou mais produtos do estoque
-- Janelas de vínculo e conferência de SKU centralizadas e ajustadas ao monitor disponível, com resumo visual das etapas
+- Janelas de vínculo e conferência de SKU centralizadas geometricamente no monitor, inclusive com escala do Windows acima de 100%, e ajustadas à área disponível
 - Conferência por SKU e baixa consolidada por produto antes de levar a lista para Movimentações
 - Gerenciador de SKUs na aba Cadastro para criar, pesquisar, alterar ou excluir vínculos futuros
 - Editor de SKU responsivo com busca curta, tabela virtualizada e seleção de produtos por clique, sem criar dezenas de controles pesados

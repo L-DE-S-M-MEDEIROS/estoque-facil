@@ -33,7 +33,7 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.2.6"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 SEARCH_RESULT_LIMIT = 18
 
@@ -168,7 +168,12 @@ def centered_dialog_geometry(
     desired_height: int,
     margin: int = 24,
 ) -> str:
-    """Fit and center a dialog inside the work area containing its parent."""
+    """Fit and visually center a CustomTkinter dialog on its parent monitor.
+
+    CustomTkinter scales the requested width and height, but deliberately keeps
+    the x/y coordinates unscaled.  Monitor work areas are physical pixels, so
+    both spaces must be reconciled before calculating the centered position.
+    """
 
     fallback = [(0, 0, parent.winfo_screenwidth(), parent.winfo_screenheight())]
     work_areas = getattr(parent, "work_areas", fallback) or fallback
@@ -184,16 +189,78 @@ def centered_dialog_geometry(
         work_areas[0],
     )
     left, top, right, bottom = target
+    try:
+        window_scaling = float(ctk.ScalingTracker.get_window_scaling(parent))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        window_scaling = 1.0
+    window_scaling = max(0.5, min(window_scaling, 4.0))
     # Tk's geometry describes the client area. Reserve the native Windows frame,
     # title bar and a small safety strip so the bottom actions never sit behind
     # the taskbar on short displays.
     available_width = max(320, right - left - margin * 2 - 16)
     available_height = max(280, bottom - top - margin * 2 - 136)
-    width = min(max(320, int(desired_width)), available_width)
-    height = min(max(280, int(desired_height)), available_height)
-    x = left + (right - left - width) // 2
-    y = top + (bottom - top - height) // 2
+    physical_width = min(max(round(320 * window_scaling), round(desired_width * window_scaling)), available_width)
+    physical_height = min(max(round(280 * window_scaling), round(desired_height * window_scaling)), available_height)
+    width = max(1, round(physical_width / window_scaling))
+    height = max(1, round(physical_height / window_scaling))
+    physical_width = min(available_width, round(width * window_scaling))
+    physical_height = min(available_height, round(height * window_scaling))
+    x = left + (right - left - physical_width) // 2
+    y = top + (bottom - top - physical_height) // 2
     return f"{width}x{height}{x:+d}{y:+d}"
+
+
+def centered_outer_position(
+    work_area: tuple[int, int, int, int],
+    outer_width: int,
+    outer_height: int,
+) -> tuple[int, int]:
+    """Return the exact position that centers an outer window rectangle."""
+
+    left, top, right, bottom = work_area
+    return (
+        left + ((right - left) - outer_width) // 2,
+        top + ((bottom - top) - outer_height) // 2,
+    )
+
+
+def center_native_window(window: tk.Misc, parent: tk.Misc) -> None:
+    """Center the complete native frame on the monitor containing ``parent``."""
+
+    if sys.platform != "win32":
+        return
+    try:
+        window.update_idletasks()
+        user32 = ctypes.windll.user32
+        get_ancestor = user32.GetAncestor
+        get_ancestor.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+        get_ancestor.restype = ctypes.c_void_p
+        monitor_from_window = user32.MonitorFromWindow
+        monitor_from_window.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+        monitor_from_window.restype = ctypes.c_void_p
+
+        window_handle = get_ancestor(ctypes.c_void_p(window.winfo_id()), 2)
+        parent_handle = get_ancestor(ctypes.c_void_p(parent.winfo_id()), 2)
+        if not window_handle or not parent_handle:
+            return
+        rectangle = _Rect()
+        if not user32.GetWindowRect(ctypes.c_void_p(window_handle), ctypes.byref(rectangle)):
+            return
+        monitor = monitor_from_window(ctypes.c_void_p(parent_handle), 2)
+        info = _MonitorInfo()
+        info.cbSize = ctypes.sizeof(_MonitorInfo)
+        if not monitor or not user32.GetMonitorInfoW(ctypes.c_void_p(monitor), ctypes.byref(info)):
+            return
+        work = info.rcWork
+        x, y = centered_outer_position(
+            (work.left, work.top, work.right, work.bottom),
+            rectangle.right - rectangle.left,
+            rectangle.bottom - rectangle.top,
+        )
+        flags = 0x0001 | 0x0004 | 0x0010  # NOSIZE | NOZORDER | NOACTIVATE
+        user32.SetWindowPos(ctypes.c_void_p(window_handle), None, x, y, 0, 0, flags)
+    except (AttributeError, OSError, tk.TclError, ValueError):
+        return
 
 
 def data_dir() -> Path:
@@ -407,6 +474,90 @@ def build_simulation_print_pdf(output_path: Path, rows: list[dict], operation: s
         canvas.saveState();canvas.setStrokeColor(pdf_colors.HexColor("#D5DEE7"));canvas.line(16*mm,12*mm,A4[0]-16*mm,12*mm);canvas.setFont("Helvetica",8);canvas.setFillColor(pdf_colors.HexColor("#748092"));canvas.drawString(16*mm,7.5*mm,APP_NAME);canvas.drawRightString(A4[0]-16*mm,7.5*mm,f"Página {doc.page}");canvas.restoreState()
 
     document.build(story,onFirstPage=draw_footer,onLaterPages=draw_footer)
+    return output
+
+
+def build_current_stock_print_pdf(output_path: Path, products, generated_at: datetime | None = None) -> Path:
+    """Create the complete stock-count sheet with a blank manual check field."""
+
+    product_rows = list(products)
+    if not product_rows:
+        raise ValueError("Cadastre produtos antes de imprimir o estoque atual.")
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = generated_at or datetime.now()
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "CurrentStockTitle", parent=styles["Title"], fontName="Helvetica-Bold",
+        fontSize=18, leading=22, textColor=pdf_colors.HexColor("#202936"),
+        alignment=TA_LEFT, spaceAfter=5*mm,
+    )
+    meta_style = ParagraphStyle(
+        "CurrentStockMeta", parent=styles["BodyText"], fontName="Helvetica",
+        fontSize=9, leading=12, textColor=pdf_colors.HexColor("#657386"), alignment=TA_LEFT,
+    )
+    cell_style = ParagraphStyle(
+        "CurrentStockCell", parent=styles["BodyText"], fontName="Helvetica",
+        fontSize=9.2, leading=11.5, textColor=pdf_colors.HexColor("#202936"), alignment=TA_LEFT,
+    )
+    centered_style = ParagraphStyle("CurrentStockCentered", parent=cell_style, alignment=TA_CENTER)
+    document = SimpleDocTemplate(
+        str(output), pagesize=A4, rightMargin=16*mm, leftMargin=16*mm,
+        topMargin=16*mm, bottomMargin=17*mm,
+        title="Estoque atual - Folha de conferência", author=APP_NAME,
+    )
+    story = [
+        Paragraph("Estoque atual - Folha de conferência", title_style),
+        Paragraph(
+            f"{len(product_rows)} produto(s) &nbsp;&nbsp;|&nbsp;&nbsp; Gerada em {timestamp.strftime('%d/%m/%Y às %H:%M')}",
+            meta_style,
+        ),
+        Spacer(1, 2.5*mm),
+        Paragraph("Anote na coluna <b>Conferência</b> a quantidade encontrada na contagem física.", meta_style),
+        Spacer(1, 6*mm),
+    ]
+    table_data = [[
+        Paragraph("Grupo", cell_style),
+        Paragraph("Produto", cell_style),
+        Paragraph("Saldo atual", centered_style),
+        Paragraph("Conferência", centered_style),
+    ]]
+    for product in product_rows:
+        group_name = str(product["group_name"] or "Sem grupo")
+        product_name = str(product["name"] or "")
+        if product["variant"]:
+            product_name = f"{product_name} • {product['variant']}"
+        confirmation_box = Table([[""]], colWidths=[27*mm], rowHeights=[7*mm])
+        confirmation_box.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.8, pdf_colors.HexColor("#7C8EA1")),
+            ("BACKGROUND", (0, 0), (-1, -1), pdf_colors.white),
+        ]))
+        table_data.append([
+            Paragraph(xml_escape(group_name), cell_style),
+            Paragraph(xml_escape(product_name), cell_style),
+            Paragraph(f"{fmt_number(product['stock'])} {xml_escape(str(product['unit']))}", centered_style),
+            confirmation_box,
+        ])
+    table = Table(table_data, colWidths=[42*mm, 72*mm, 30*mm, 31*mm], repeatRows=1, hAlign="LEFT")
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), pdf_colors.HexColor("#E4F0F7")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), pdf_colors.HexColor("#245F89")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ALIGN", (2, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.35, pdf_colors.HexColor("#D5DEE7")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [pdf_colors.white, pdf_colors.HexColor("#F8FAFC")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 7),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(table)
+
+    def draw_footer(canvas, doc):
+        canvas.saveState();canvas.setStrokeColor(pdf_colors.HexColor("#D5DEE7"));canvas.line(16*mm,12*mm,A4[0]-16*mm,12*mm);canvas.setFont("Helvetica",8);canvas.setFillColor(pdf_colors.HexColor("#748092"));canvas.drawString(16*mm,7.5*mm,APP_NAME);canvas.drawRightString(A4[0]-16*mm,7.5*mm,f"Página {doc.page}");canvas.restoreState()
+
+    document.build(story, onFirstPage=draw_footer, onLaterPages=draw_footer)
     return output
 
 
@@ -1642,11 +1793,11 @@ class SkuMappingEditorDialog(BrandedToplevel):
         super().__init__(parent, fg_color=COLORS["background"])
         self.parent = parent; self.mapping_id = mapping_id; self.result: int | None = None
         self.title("Vincular SKU a produtos")
-        scale = parent.ui_scale; width, height = round(820*scale), round(560*scale)
+        width, height = 820, 560
         geometry = centered_dialog_geometry(parent, width, height)
         fitted = parse_window_geometry(geometry)
         self.geometry(geometry)
-        self.minsize(min(round(680*scale), fitted[0]), min(round(440*scale), fitted[1])); self.transient(parent); self.grab_set()
+        self.minsize(min(680, fitted[0]), min(440, fitted[1])); self.transient(parent); self.grab_set()
         self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(1, weight=1)
         self.bind("<Escape>", lambda _event: self.destroy())
 
@@ -1681,7 +1832,7 @@ class SkuMappingEditorDialog(BrandedToplevel):
         actions=ctk.CTkFrame(content,fg_color="transparent");actions.grid(row=4,column=0,sticky="ew",pady=(14,0))
         ctk.CTkButton(actions,text="Cancelar",width=105,height=40,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.destroy).pack(side="left")
         ctk.CTkButton(actions,text="Salvar vínculo",width=160,height=40,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.save).pack(side="right")
-        self.refresh_products(); self.after_idle(self.search.focus_set if locked_sku else self.sku_entry.focus_set)
+        self.refresh_products(); self.after(40, lambda: center_native_window(self, parent)); self.after_idle(self.search.focus_set if locked_sku else self.sku_entry.focus_set)
 
     def refresh_products(self):
         self._search_job=None;self.product_tree.delete(*self.product_tree.get_children());query=self.search.get().strip();visible=0
@@ -1720,7 +1871,7 @@ class SkuMappingEditorDialog(BrandedToplevel):
 class SkuManagerDialog(BrandedToplevel):
     def __init__(self,parent:"EstoqueApp"):
         super().__init__(parent,fg_color=COLORS["background"]);self.parent=parent;self.title("Gerenciar vínculos de SKU")
-        scale=parent.ui_scale;width,height=round(940*scale),round(590*scale);self.geometry(f"{width}x{height}+{parent.winfo_x()+55}+{parent.winfo_y()+55}");self.minsize(round(760*scale),round(480*scale));self.transient(parent);self.grab_set();self.grid_columnconfigure(0,weight=1);self.grid_rowconfigure(1,weight=1)
+        width,height=940,590;geometry=centered_dialog_geometry(parent,width,height);fitted=parse_window_geometry(geometry);self.geometry(geometry);self.minsize(min(760,fitted[0]),min(480,fitted[1]));self.transient(parent);self.grab_set();self.grid_columnconfigure(0,weight=1);self.grid_rowconfigure(1,weight=1)
         header=ctk.CTkFrame(self,fg_color=COLORS["surface"],corner_radius=0);header.grid(row=0,column=0,sticky="ew")
         ctk.CTkLabel(header,text="SKUS DE VENDA",text_color=COLORS["accent"],font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=28,pady=(18,2));ctk.CTkLabel(header,text="Memória de produtos por SKU",text_color=COLORS["text"],font=ctk.CTkFont("Inter",22,"bold")).pack(anchor="w",padx=28)
         ctk.CTkLabel(header,text="Consulte e altere quais produtos serão descontados nas próximas listas importadas.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=28,pady=(5,18))
@@ -1731,7 +1882,7 @@ class SkuManagerDialog(BrandedToplevel):
         ctk.CTkButton(toolbar,text="Novo SKU",image=parent.icons["plus"],height=40,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.new_mapping).pack(side="right")
         ctk.CTkButton(toolbar,text="Excluir",image=parent.icons["trash"],height=40,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["danger"],command=self.delete_mapping).pack(side="right",padx=8)
         ctk.CTkButton(toolbar,text="Editar vínculo",image=parent.icons["edit"],height=40,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.edit_mapping).pack(side="right")
-        card=Card(content);card.grid(row=1,column=0,sticky="nsew");self.tree=parent.table(card,("sku","products"),("SKU","Produtos descontados"),(260,570));self.tree.column("products",anchor="w");self.tree.pack(fill="both",expand=True,padx=18,pady=18);self.tree.bind("<Double-1>",lambda _event:self.edit_mapping());self.refresh()
+        card=Card(content);card.grid(row=1,column=0,sticky="nsew");self.tree=parent.table(card,("sku","products"),("SKU","Produtos descontados"),(260,570));self.tree.column("products",anchor="w");self.tree.pack(fill="both",expand=True,padx=18,pady=18);self.tree.bind("<Double-1>",lambda _event:self.edit_mapping());self.refresh();self.after(40,lambda:center_native_window(self,parent))
 
     def refresh(self):
         self._search_job=None
@@ -1772,7 +1923,7 @@ class SkuManagerDialog(BrandedToplevel):
 class SalesListReviewDialog(BrandedToplevel):
     def __init__(self,parent:"EstoqueApp",source_label:str,file_name:str,items):
         super().__init__(parent,fg_color=COLORS["background"]);self.parent=parent;self.items=items;self.result=False;self.title(f"Conferir lista {source_label}")
-        scale=parent.ui_scale;width,height=round(1020*scale),round(600*scale);geometry=centered_dialog_geometry(parent,width,height);fitted=parse_window_geometry(geometry);self.geometry(geometry);self.minsize(min(round(820*scale),fitted[0]),min(round(500*scale),fitted[1]));self.transient(parent);self.grab_set();self.grid_columnconfigure(0,weight=1);self.grid_rowconfigure(1,weight=1);self.bind("<Escape>",lambda _event:self.destroy())
+        width,height=1020,600;geometry=centered_dialog_geometry(parent,width,height);fitted=parse_window_geometry(geometry);self.geometry(geometry);self.minsize(min(820,fitted[0]),min(500,fitted[1]));self.transient(parent);self.grab_set();self.grid_columnconfigure(0,weight=1);self.grid_rowconfigure(1,weight=1);self.bind("<Escape>",lambda _event:self.destroy())
         header=ctk.CTkFrame(self,fg_color=COLORS["surface"],corner_radius=0);header.grid(row=0,column=0,sticky="ew")
         ctk.CTkLabel(header,text=f"LISTA {source_label.upper()}",text_color=COLORS["accent"],font=ctk.CTkFont("Inter",10,"bold")).pack(anchor="w",padx=28,pady=(13,2));ctk.CTkLabel(header,text="Confira antes de levar para Movimentações",text_color=COLORS["text"],font=ctk.CTkFont("Inter",21,"bold")).pack(anchor="w",padx=28)
         ctk.CTkLabel(header,text=f"Arquivo: {file_name}",wraplength=max(500,fitted[0]-70),justify="left",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",padx=28,pady=(4,13))
@@ -2484,6 +2635,12 @@ class EstoqueApp(ctk.CTk):
         output=data_dir()/"impressoes"/f"lista-separacao-simulacao-{datetime.now().strftime('%Y%m%d-%H%M%S')}.pdf"
         try:build_simulation_print_pdf(output,rows,self.simulation_operation_key());os.startfile(str(output))
         except (OSError,ValueError) as error:messagebox.showerror(APP_NAME,f"Não foi possível abrir a lista para impressão.\n\n{error}\n\nArquivo: {output}",parent=self)
+    def print_current_stock(self):
+        products=self.db.products()
+        if not products:messagebox.showinfo(APP_NAME,"Cadastre produtos antes de imprimir o estoque atual.",parent=self);return
+        output=data_dir()/"impressoes"/f"estoque-atual-conferencia-{datetime.now().strftime('%Y%m%d-%H%M%S')}.pdf"
+        try:build_current_stock_print_pdf(output,products);os.startfile(str(output))
+        except (OSError,ValueError) as error:messagebox.showerror(APP_NAME,f"Não foi possível abrir o estoque para impressão.\n\n{error}\n\nArquivo: {output}",parent=self)
     def save_simulation_draft(self):
         if not hasattr(self,"simulation_items"):return
         self.simulation_store.values={"operation":self.simulation_operation_key(),"items":[dict(item) for item in self.simulation_items]};self.simulation_store.save()
@@ -2714,6 +2871,7 @@ class EstoqueApp(ctk.CTk):
         ctk.CTkButton(form,text="Confirmar contagem",height=40,corner_radius=10,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.register_count).pack(fill="x",padx=20,pady=(0,14))
         listing=Card(body);listing.grid(row=0,column=1,sticky="nsew");bar=ctk.CTkFrame(listing,fg_color="transparent");bar.pack(fill="x",padx=20,pady=16);ctk.CTkLabel(bar,text="Check-in dos produtos",text_color=COLORS["text"],font=ctk.CTkFont("Inter",16,"bold")).pack(side="left")
         self.count_filter=tk.StringVar(value=self.settings.get("count_filter","todos"));ctk.CTkOptionMenu(bar,variable=self.count_filter,values=["todos","pendentes","verificados"],width=110,height=36,fg_color=COLORS["surface_alt"],button_color=COLORS["surface_hover"],text_color=COLORS["text"],command=lambda _value:(self.refresh_counts(),self.save_interface_state())).pack(side="right")
+        ctk.CTkButton(bar,text="Imprimir estoque",image=self.icons["print"],width=135,height=36,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.print_current_stock).pack(side="right",padx=(0,8))
         ctk.CTkButton(bar,text="Contar",image=self.icons["count"],width=95,height=36,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.prepare_count).pack(side="right",padx=(0,8))
         ctk.CTkButton(bar,text="Editar produto",image=self.icons["edit"],width=125,height=36,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.edit_selected_count_product).pack(side="right",padx=(0,8))
         ctk.CTkButton(bar,text="Explicar",width=90,height=36,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.explain_confidence).pack(side="right",padx=(0,8))

@@ -411,6 +411,30 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertNotIn("Estoque atual",text)
         self.assertNotIn("Saldo projetado",text)
 
+    def test_current_stock_print_pdf_contains_requested_columns_and_manual_check_box(self):
+        products = [
+            {"id":1,"name":"MARINHO","group_name":"2 PEÇAS","variant":"LISO","category":"","stock":14,"unit":"un"},
+            {"id":2,"name":"CARAMELO","group_name":"4 PEÇAS","variant":"","category":"","stock":31,"unit":"un"},
+        ]
+        output = Path(self.temporary_directory.name) / "estoque-atual.pdf"
+        app.build_current_stock_print_pdf(output,products,datetime(2026,9,1,10,15))
+        text = "\n".join(page.extract_text() or "" for page in PdfReader(output).pages)
+        self.assertIn("Grupo",text)
+        self.assertIn("Produto",text)
+        self.assertIn("Saldo atual",text)
+        self.assertIn("Conferência",text)
+        self.assertIn("2 PEÇAS",text)
+        self.assertIn("MARINHO",text)
+        self.assertIn("LISO",text)
+        self.assertIn("14 un",text)
+        self.assertIn("4 PEÇAS",text)
+        self.assertIn("CARAMELO",text)
+        self.assertIn("31 un",text)
+        self.assertNotIn("Mínimo",text)
+        self.assertNotIn("Situação",text)
+        self.assertNotIn("Valor estimado",text)
+        self.assertNotIn("Quantidade simulada",text)
+
     def test_cloud_payload_contains_inventory_and_photo(self):
         photo = app.data_dir() / "fotos" / "produto.png"
         photo.write_bytes(b"imagem")
@@ -507,6 +531,9 @@ class InventoryDatabaseTests(unittest.TestCase):
 
 
 class WindowGeometryTests(unittest.TestCase):
+    def test_outer_window_position_is_mathematically_centered(self):
+        self.assertEqual(app.centered_outer_position((0, 0, 1920, 1040), 1278, 789), (321, 125))
+
     def test_dialog_is_centered_and_fitted_to_the_parent_monitor(self):
         class Parent:
             work_areas = [(0, 0, 1920, 1040), (1920, 0, 3200, 720)]
@@ -536,6 +563,36 @@ class WindowGeometryTests(unittest.TestCase):
         width, height, x, y = app.parse_window_geometry(geometry)
         self.assertEqual((width, height), (1216, 536))
         self.assertEqual((x, y), (1952, 92))
+
+    def test_dialog_center_accounts_for_customtkinter_window_scaling(self):
+        class Parent:
+            work_areas = [(0, 0, 1920, 1040)]
+
+            def update_idletasks(self):
+                pass
+
+            def winfo_rootx(self):
+                return 0
+
+            def winfo_rooty(self):
+                return 0
+
+            def winfo_width(self):
+                return 1920
+
+            def winfo_height(self):
+                return 1040
+
+            def winfo_screenwidth(self):
+                return 1920
+
+            def winfo_screenheight(self):
+                return 1080
+
+        with patch.object(app.ctk.ScalingTracker, "get_window_scaling", return_value=1.25):
+            geometry = app.centered_dialog_geometry(Parent(), 1020, 600)
+
+        self.assertEqual(app.parse_window_geometry(geometry), (1020, 600, 322, 145))
 
 
 class LocalStateTests(unittest.TestCase):
