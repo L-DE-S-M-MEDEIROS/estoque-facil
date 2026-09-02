@@ -9,6 +9,7 @@ import shutil
 import sqlite3
 import sys
 import threading
+import webbrowser
 from datetime import date, datetime, timezone
 from pathlib import Path
 import tkinter as tk
@@ -28,12 +29,13 @@ from premium_icons import app_icon, application_icon_path, brand_mark, icon
 from premium_widgets import MaskedDateEntry, SmoothScrollableFrame, TreeConfidenceOverlay, TreeRelativeDateOverlay, TreeRowSeparatorOverlay, TreeStockOverlay, confidence_tier, tree_wheel_units
 from cloud_sync import CloudSync, CloudSyncError
 from database_utils import configure_database_connection, database_integrity_errors, normalize_identity_text
+from excel_sync import EXCEL_ONLINE_URL, ExcelSyncError, MonthlyStockWorkbook, combined_product_name, month_last_day, month_title, workbook_data_fingerprint
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
 from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.6"
+APP_VERSION = "1.2.7"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 SEARCH_RESULT_LIMIT = 18
 
@@ -589,8 +591,8 @@ def mapped_sales_list(database, items) -> tuple[list[dict], list[dict]]:
 
 
 class Database:
-    def __init__(self) -> None:
-        self.path = data_dir() / "estoque.db"
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = Path(path) if path else data_dir() / "estoque.db"
         self.db = sqlite3.connect(self.path, timeout=5)
         self.db.row_factory = sqlite3.Row
         configure_database_connection(self.db)
@@ -647,9 +649,24 @@ class Database:
                 PRIMARY KEY(mapping_id,product_id),
                 FOREIGN KEY(mapping_id) REFERENCES sku_mappings(id) ON DELETE CASCADE,
                 FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
+            CREATE TABLE IF NOT EXISTS monthly_stock_counts(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                count_month TEXT NOT NULL,
+                product_id INTEGER NOT NULL,
+                system_stock REAL NOT NULL,
+                counted_quantity REAL NOT NULL CHECK(counted_quantity>=0),
+                difference REAL NOT NULL,
+                count_date TEXT NOT NULL,
+                counted_by TEXT NOT NULL,
+                movement_batch_id INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(count_month,product_id),
+                FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE,
+                FOREIGN KEY(movement_batch_id) REFERENCES movement_batches(id) ON DELETE CASCADE);
             CREATE INDEX IF NOT EXISTS idx_movements_product ON movements(product_id);
             CREATE INDEX IF NOT EXISTS idx_movements_date ON movements(movement_date DESC);
             CREATE INDEX IF NOT EXISTS idx_sku_mapping_products_product ON sku_mapping_products(product_id);
+            CREATE INDEX IF NOT EXISTS idx_monthly_stock_counts_month ON monthly_stock_counts(count_month);
         """)
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(products)")}
         if "group_name" not in columns:
@@ -1065,6 +1082,172 @@ class Database:
 
     def stock(self, product_id: int) -> float:
         return float(self.db.execute("SELECT COALESCE(SUM(quantity),0) value FROM movements WHERE product_id=?", (product_id,)).fetchone()["value"])
+
+    def stock_as_of(self, product_id: int, end_date: str) -> float:
+        return float(self.db.execute(
+            "SELECT COALESCE(SUM(quantity),0) value FROM movements WHERE product_id=? AND movement_date<=?",
+            (product_id, end_date),
+        ).fetchone()["value"])
+
+    def workbook_months(self, reference: date | None = None) -> list[str]:
+        current = reference or date.today()
+        current_month = current.strftime("%Y-%m")
+        row = self.db.execute("""SELECT MIN(value) first_month FROM (
+            SELECT substr(created_at,1,7) value FROM products WHERE length(created_at)>=7
+            UNION ALL
+            SELECT substr(movement_date,1,7) value FROM movements WHERE length(movement_date)>=7
+            UNION ALL
+            SELECT count_month value FROM monthly_stock_counts
+        ) WHERE value GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]'""").fetchone()
+        first_month = str(row["first_month"] or current_month)
+        start_year, start_number = (int(part) for part in first_month.split("-"))
+        end_year, end_number = current.year, current.month
+        if (start_year, start_number) > (end_year, end_number):
+            return [current_month]
+        result: list[str] = []
+        year, number = start_year, start_number
+        while (year, number) <= (end_year, end_number) and len(result) < 120:
+            result.append(f"{year:04d}-{number:02d}")
+            number += 1
+            if number == 13:
+                year += 1
+                number = 1
+        return result
+
+    def monthly_stock_rows(self, month: str, reference: date | None = None) -> list[dict]:
+        current = reference or date.today()
+        current_month = current.strftime("%Y-%m")
+        end_date = min(month_last_day(month), current.isoformat()) if month == current_month else month_last_day(month)
+        products = self.db.execute("""SELECT p.id,p.name,p.group_name,p.variant,
+                COALESCE(SUM(CASE WHEN m.movement_date<=? THEN m.quantity ELSE 0 END),0) final_stock
+            FROM products p LEFT JOIN movements m ON m.product_id=p.id
+            WHERE substr(p.created_at,1,10)<=? OR EXISTS(
+                SELECT 1 FROM movements existing
+                WHERE existing.product_id=p.id AND existing.movement_date<=?
+            )
+            GROUP BY p.id
+            ORDER BY p.group_name COLLATE NOCASE,p.name COLLATE NOCASE,p.variant COLLATE NOCASE""",
+            (end_date, end_date, end_date),
+        ).fetchall()
+        counts = {
+            int(row["product_id"]): row
+            for row in self.db.execute("SELECT * FROM monthly_stock_counts WHERE count_month=?", (month,))
+        }
+        result: list[dict] = []
+        for product in products:
+            count = counts.get(int(product["id"]))
+            final_stock = float(product["final_stock"])
+            counted = float(count["counted_quantity"]) if count else None
+            result.append({
+                "product_id": int(product["id"]),
+                "product": combined_product_name(dict(product)),
+                "system_stock": float(count["system_stock"]) if count else final_stock,
+                "counted": counted,
+                "difference": float(count["difference"]) if count else None,
+                "post_count_delta": final_stock - counted if count else 0.0,
+                "final_stock": final_stock,
+            })
+        return result
+
+    def save_monthly_count(
+        self,
+        product_id: int,
+        count_month: str,
+        counted_quantity: float,
+        counted_by: str,
+        count_date: str | None = None,
+    ) -> dict:
+        if not re.fullmatch(r"\d{4}-\d{2}", count_month):
+            raise ValueError("O mês da contagem é inválido.")
+        if not self.product(product_id):
+            raise ValueError("Esse produto não existe mais.")
+        counted = float(counted_quantity)
+        if not math.isfinite(counted) or counted < 0:
+            raise ValueError("A quantidade contada não pode ser negativa.")
+        responsible = " ".join(str(counted_by or "").strip().split()) or "Planilha Excel"
+        today = date.today()
+        if count_month > today.strftime("%Y-%m"):
+            raise ValueError("Não é possível registrar contagem em um mês futuro.")
+        effective_date = count_date or (today.isoformat() if count_month == today.strftime("%Y-%m") else month_last_day(count_month))
+        if not effective_date.startswith(count_month):
+            raise ValueError("A data da contagem precisa pertencer ao mês selecionado.")
+        existing = self.db.execute(
+            "SELECT * FROM monthly_stock_counts WHERE count_month=? AND product_id=?",
+            (count_month, product_id),
+        ).fetchone()
+        now = datetime.now().isoformat(timespec="seconds")
+        if existing:
+            if abs(float(existing["counted_quantity"]) - counted) < .0000001:
+                return dict(existing) | {"changed": False}
+            system_stock = float(existing["system_stock"])
+            self.update_movement_batch(
+                int(existing["movement_batch_id"]),
+                "inventario",
+                [(product_id, counted)],
+                str(existing["count_date"]),
+                "Contagem mensal pelo Excel Online",
+                responsible,
+            )
+            difference = counted - system_stock
+            with self.db:
+                self.db.execute("""UPDATE monthly_stock_counts
+                    SET counted_quantity=?,difference=?,counted_by=?,updated_at=? WHERE id=?""",
+                    (counted, difference, responsible, now, existing["id"]),
+                )
+            return dict(self.db.execute("SELECT * FROM monthly_stock_counts WHERE id=?", (existing["id"],)).fetchone()) | {"changed": True}
+
+        system_stock = self.stock(product_id) if count_month == today.strftime("%Y-%m") else self.stock_as_of(product_id, effective_date)
+        batch_id = self.add_movement_batch(
+            "inventario",
+            [(product_id, counted)],
+            effective_date,
+            "Contagem mensal pelo Excel Online",
+            responsible,
+        )
+        difference = counted - system_stock
+        with self.db:
+            cursor = self.db.execute("""INSERT INTO monthly_stock_counts(
+                    count_month,product_id,system_stock,counted_quantity,difference,count_date,counted_by,movement_batch_id,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (count_month, product_id, system_stock, counted, difference, effective_date, responsible, batch_id, now),
+            )
+        return dict(self.db.execute("SELECT * FROM monthly_stock_counts WHERE id=?", (cursor.lastrowid,)).fetchone()) | {"changed": True}
+
+    def record_monthly_count(
+        self,
+        product_id: int,
+        counted_quantity: float,
+        count_date: str,
+        counted_by: str,
+        reason: str = "Contagem física",
+    ) -> dict:
+        counted = float(counted_quantity)
+        previous = self.stock(product_id)
+        batch_id = self.add_movement_batch(
+            "inventario", [(product_id, counted)], count_date, reason, counted_by
+        )
+        month = count_date[:7]
+        difference = counted - previous
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.db:
+            self.db.execute("""INSERT INTO monthly_stock_counts(
+                    count_month,product_id,system_stock,counted_quantity,difference,count_date,counted_by,movement_batch_id,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(count_month,product_id) DO UPDATE SET
+                    system_stock=excluded.system_stock,
+                    counted_quantity=excluded.counted_quantity,
+                    difference=excluded.difference,
+                    count_date=excluded.count_date,
+                    counted_by=excluded.counted_by,
+                    movement_batch_id=excluded.movement_batch_id,
+                    updated_at=excluded.updated_at""",
+                (month, product_id, previous, counted, difference, count_date, counted_by, batch_id, now),
+            )
+        row = self.db.execute(
+            "SELECT * FROM monthly_stock_counts WHERE count_month=? AND product_id=?",
+            (month, product_id),
+        ).fetchone()
+        return dict(row) | {"changed": True}
 
     def negative_stock_products(self) -> list[sqlite3.Row]:
         return self.db.execute("""SELECT p.id,p.name,p.group_name,p.variant,p.unit,COALESCE(SUM(m.quantity),0) stock
@@ -2259,7 +2442,7 @@ class EstoqueApp(ctk.CTk):
         self.settings = self.preferences_store.values
         self.cloud_settings = self.cloud_session_store.values
         ctk.set_appearance_mode(self.settings.get("theme", "Light"))
-        self.db = Database(); self.cloud = CloudSync(data_dir(), self.cloud_settings); self.db.on_change = self.schedule_cloud_sync; self.save_cloud_settings(); self.title(f"{APP_NAME} — v{APP_VERSION}")
+        self.db = Database(); self.cloud = CloudSync(data_dir(), self.cloud_settings); self.db.on_change = self.schedule_data_sync; self.save_cloud_settings(); self.title(f"{APP_NAME} — v{APP_VERSION}")
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight(); self.work_areas = monitor_work_areas(sw, sh)
         primary = self.work_areas[0]; work_width, work_height = primary[2]-primary[0], primary[3]-primary[1]
         self.minimum_width = min(work_width, round(1050*self.ui_scale)); self.minimum_height = min(work_height, round(680*self.ui_scale))
@@ -2274,12 +2457,15 @@ class EstoqueApp(ctk.CTk):
         self._ui_jobs: dict[str, str] = {}
         self.update_events: queue.Queue = queue.Queue(); self.update_busy = False; self.update_button = None
         self.cloud_events: queue.Queue = queue.Queue(); self.cloud_sync_busy = False; self.cloud_sync_pending = False; self.cloud_sync_timer = None
+        self.excel_events: queue.Queue = queue.Queue(); self.excel_sync_busy = False; self.excel_sync_pending = False; self.excel_sync_timer = None; self.excel_last_fingerprint = None
         self.nav_buttons = {}; self.pages = {}; self.current_page = ""; self.build_shell(); self.show_page(self.settings.get("last_page", "stock"))
         self.bind("<Configure>", self.remember_window_geometry)
         self.after_idle(self.restore_window)
         self.after(2500, lambda: self.check_updates(silent=True))
         self.after(4000, lambda: self.start_cloud_sync(silent=True))
+        self.after(6500, lambda: self.start_excel_sync(silent=True))
         self.after(20000, self.periodic_cloud_sync)
+        self.after(10000, self.periodic_excel_sync)
 
     def save_settings(self): self.preferences_store.save(); self.settings = self.preferences_store.values
 
@@ -2306,6 +2492,10 @@ class EstoqueApp(ctk.CTk):
         self.schedule_ui_task("save_settings", self.save_settings, 260)
 
     def save_cloud_settings(self): self.cloud_session_store.values = self.cloud_settings; self.cloud_session_store.save(); self.cloud_settings = self.cloud_session_store.values
+
+    def schedule_data_sync(self):
+        self.schedule_cloud_sync()
+        self.schedule_excel_sync()
 
     def capture_interface_preferences(self):
         if self.current_page:self.settings["last_page"] = self.current_page
@@ -2973,7 +3163,9 @@ class EstoqueApp(ctk.CTk):
         except ValueError as error:messagebox.showwarning(APP_NAME,str(error)or"Revise a quantidade e a data.",parent=self);return
         if amount<0:messagebox.showwarning(APP_NAME,"A quantidade contada não pode ser negativa.",parent=self);return
         previous=self.db.stock(pid);difference=amount-previous
-        try:self.db.add_movement(pid,"inventario",amount,count_date.isoformat(),self.c_note.get().strip() or "Contagem física",checked_by=responsible)
+        try:
+            result=self.db.record_monthly_count(pid,amount,count_date.isoformat(),responsible,self.c_note.get().strip() or "Contagem física")
+            difference=float(result["difference"])
         except ValueError as error:messagebox.showwarning(APP_NAME,str(error),parent=self);return
         self.settings["counter_name"]=responsible;self.save_settings();self.c_quantity.set("");self.c_note.set("");self.c_date_entry.set_date(date.today());self.refresh_all();self.update_count_current();messagebox.showinfo(APP_NAME,f"Contagem confirmada.\nDiferença encontrada: {'+' if difference>0 else ''}{fmt_number(difference)}",parent=self);self.reset_count_product_search()
 
@@ -3692,6 +3884,13 @@ class EstoqueApp(ctk.CTk):
         ctk.CTkButton(cloud_actions,text="Conta",width=90,height=38,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.cloud_account).pack(side="left",padx=4)
         ctk.CTkButton(cloud_actions,text="Enviar dados",width=115,height=38,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.cloud_upload).pack(side="left",padx=4)
         ctk.CTkButton(cloud_actions,text="Baixar dados",width=115,height=38,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.cloud_download).pack(side="left",padx=4)
+        excel=Card(page);excel.pack(fill="x",pady=(0,16));excel_row=ctk.CTkFrame(excel,fg_color="transparent");excel_row.pack(fill="x",padx=22,pady=18)
+        excel_text=ctk.CTkFrame(excel_row,fg_color="transparent");excel_text.pack(fill="x")
+        ctk.CTkLabel(excel_text,text="Excel Online — fechamento mensal",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w")
+        self.excel_status=tk.StringVar();ctk.CTkLabel(excel_text,textvariable=self.excel_status,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(4,0));self.update_excel_status()
+        excel_actions=ctk.CTkFrame(excel_row,fg_color="transparent");excel_actions.pack(anchor="w",pady=(12,0))
+        ctk.CTkButton(excel_actions,text="Atualizar agora",width=125,height=38,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=lambda:self.start_excel_sync(silent=False)).pack(side="left",padx=4)
+        ctk.CTkButton(excel_actions,text="Abrir planilha",width=115,height=38,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=lambda:webbrowser.open(EXCEL_ONLINE_URL)).pack(side="left",padx=4)
         actions=ctk.CTkFrame(page,fg_color="transparent");actions.pack(fill="both",expand=True);actions.grid_columnconfigure((0,1),weight=1)
         for index,(title,text,icon_name,command,button) in enumerate((("Atualizações",f"Versão instalada: {APP_VERSION}. Verificação automática ao abrir.","refresh",self.check_updates,"Baixar e instalar atualização"),("Backup dos dados","Salve uma cópia segura do banco local.","download",self.backup,"Baixar backup"),("Restaurar backup","Substitua os dados por um backup anterior.","upload",self.restore,"Restaurar backup"))):
             card=Card(actions);card.grid(row=index//2,column=index%2,sticky="nsew",padx=(0 if index%2==0 else 8,8 if index%2==0 else 0),pady=8);ctk.CTkLabel(card,text=title,image=self.icons[icon_name],compound="left",text_color=COLORS["text"],font=ctk.CTkFont("Inter",14,"bold")).pack(anchor="w",padx=20,pady=(20,5));ctk.CTkLabel(card,text=text,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(anchor="w",padx=20)
@@ -3704,6 +3903,91 @@ class EstoqueApp(ctk.CTk):
     def update_cloud_status(self):
         if hasattr(self,"cloud_status"):
             self.cloud_status.set(f"Conectado como {self.cloud.email} — estoque compartilhado e automático" if self.cloud.signed_in else "Desconectado — entre ou crie sua conta segura")
+
+    def update_excel_status(self, message: str | None = None):
+        if not hasattr(self, "excel_status"):
+            return
+        if message:
+            self.excel_status.set(message)
+            return
+        try:
+            MonthlyStockWorkbook()
+            self.excel_status.set("Sincronização automática ativa — arquivo encontrado no OneDrive")
+        except ExcelSyncError as error:
+            self.excel_status.set(str(error))
+
+    def schedule_excel_sync(self):
+        if not hasattr(self, "excel_events"):
+            return
+        if self.excel_sync_timer is not None:
+            try:self.after_cancel(self.excel_sync_timer)
+            except (tk.TclError,ValueError):pass
+        self.excel_sync_timer=self.after(700,lambda:self.start_excel_sync(silent=True))
+
+    def start_excel_sync(self, silent=True):
+        if not hasattr(self, "excel_events"):
+            return
+        if self.excel_sync_busy:
+            self.excel_sync_pending=True
+            return
+        self.excel_sync_busy=True;self.excel_sync_pending=False;self.excel_sync_timer=None
+        self.update_excel_status("Atualizando o Excel Online...")
+        counted_by=str(self.settings.get("counter_name") or "Planilha Excel")
+
+        def worker():
+            database=None
+            try:
+                database=Database(self.db.path)
+                workbook=MonthlyStockWorkbook()
+                imported=0
+                for entry in workbook.read_counts():
+                    result=database.save_monthly_count(entry.product_id,entry.month,entry.quantity,counted_by)
+                    imported+=bool(result.get("changed"))
+                months=[{
+                    "month":month,
+                    "rows":database.monthly_stock_rows(month),
+                    "is_current":month==date.today().strftime("%Y-%m"),
+                } for month in database.workbook_months()]
+                fingerprint=workbook_data_fingerprint(months)
+                if imported or fingerprint != self.excel_last_fingerprint:
+                    output=workbook.write(months)
+                    output["written"]=True
+                else:
+                    output={"path":str(workbook.path),"sheets":[month_title(item["month"]) for item in months],"written":False}
+                self.excel_events.put(("success",{"imported":imported,"fingerprint":fingerprint,**output},silent))
+            except (ExcelSyncError,ValueError,sqlite3.Error,OSError) as error:
+                self.excel_events.put(("error",str(error),silent))
+            finally:
+                if database is not None:
+                    database.db.close()
+
+        threading.Thread(target=worker,daemon=True).start();self.after(120,self.poll_excel_sync_events)
+
+    def poll_excel_sync_events(self):
+        try:event=self.excel_events.get_nowait()
+        except queue.Empty:
+            if self.excel_sync_busy:self.after(120,self.poll_excel_sync_events)
+            return
+        kind,result,silent=event
+        self.excel_sync_busy=False
+        if kind=="success":
+            imported=int(result.get("imported") or 0)
+            self.excel_last_fingerprint=result.get("fingerprint")
+            self.update_excel_status(f"Planilha atualizada — {len(result.get('sheets') or [])} aba(s) mensal(is)")
+            if imported:
+                self.db.invalidate_caches();self.refresh_all();self.schedule_cloud_sync()
+            if not silent:
+                message=f"Planilha atualizada no OneDrive.\n{len(result.get('sheets') or [])} aba(s) mensal(is)."
+                if imported:message+=f"\n{imported} contagem(ns) trazida(s) para o histórico."
+                messagebox.showinfo(APP_NAME,message,parent=self)
+        else:
+            self.update_excel_status(str(result))
+            if not silent:messagebox.showerror(APP_NAME,str(result),parent=self)
+        if self.excel_sync_pending:self.after(300,lambda:self.start_excel_sync(silent=True))
+
+    def periodic_excel_sync(self):
+        self.start_excel_sync(silent=True)
+        self.after(10000,self.periodic_excel_sync)
 
     def cloud_account(self):
         if self.cloud.signed_in:
@@ -3758,6 +4042,7 @@ class EstoqueApp(ctk.CTk):
         if kind=="success":
             action=result.get("action")
             if action=="downloaded":self.refresh_all()
+            self.schedule_excel_sync()
             if not silent:
                 messages={"uploaded":"Dados locais enviados ao estoque compartilhado.","downloaded":"Este computador recebeu os dados mais recentes dos outros usuários.","unchanged":"Todos os usuários já estão sincronizados."}
                 messagebox.showinfo(APP_NAME,messages.get(action,"Sincronização concluída."),parent=self)

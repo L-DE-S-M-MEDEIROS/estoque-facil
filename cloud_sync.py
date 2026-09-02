@@ -26,6 +26,7 @@ TABLES = (
     "sku_mapping_products",
     "movement_batches",
     "movements",
+    "monthly_stock_counts",
 )
 SHARED_WORKSPACE_KEY = "bolsas-baby"
 

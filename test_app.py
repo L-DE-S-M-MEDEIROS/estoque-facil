@@ -10,6 +10,7 @@ from unittest.mock import patch
 import app
 from pypdf import PdfReader
 from cloud_sync import CloudSync, CloudSyncError, TABLES
+from excel_sync import MonthlyStockWorkbook, month_title
 from premium_icons import app_icon, application_icon_path
 from PIL import Image
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
@@ -452,6 +453,80 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertEqual(payload["tables"]["products"][0]["photo"], "produto.png")
         self.assertIn("produto.png", payload["photos"])
         self.assertNotIn("simulation", payload)
+
+    def test_monthly_excel_count_is_audited_and_updates_the_final_stock(self):
+        product_id = self.create_product(name="AZUL BEBÊ", group="CASINHA", variant="")
+        today = date.today()
+        month = today.strftime("%Y-%m")
+        self.db.add_movement(product_id, "inventario", 12, today.isoformat(), "Saldo inicial", "Ana")
+
+        first = self.db.save_monthly_count(product_id, month, 10, "Romeu", today.isoformat())
+        self.assertTrue(first["changed"])
+        self.assertEqual(float(first["system_stock"]), 12)
+        self.assertEqual(float(first["difference"]), -2)
+        self.assertEqual(self.db.stock(product_id), 10)
+
+        self.db.add_movement(product_id, "entrada", 3, today.isoformat(), "Produção", "Ana")
+        row = self.db.monthly_stock_rows(month)[0]
+        self.assertEqual(row["product"], "CASINHA AZUL BEBÊ")
+        self.assertEqual(row["system_stock"], 12)
+        self.assertEqual(row["counted"], 10)
+        self.assertEqual(row["post_count_delta"], 3)
+        self.assertEqual(row["final_stock"], 13)
+
+        revised = self.db.save_monthly_count(product_id, month, 11, "Romeu", today.isoformat())
+        self.assertTrue(revised["changed"])
+        self.assertEqual(float(revised["system_stock"]), 12)
+        self.assertEqual(float(revised["difference"]), -1)
+        self.assertEqual(self.db.stock(product_id), 14)
+        self.assertEqual(self.db.db.execute("SELECT COUNT(*) FROM monthly_stock_counts").fetchone()[0], 1)
+
+    def test_monthly_excel_workbook_has_formulas_colors_total_and_editable_count(self):
+        product_id = self.create_product(name="AZUL BEBÊ", group="CASINHA", variant="")
+        month = date.today().strftime("%Y-%m")
+        path = Path(self.temporary_directory.name) / "ESTOQUE SICRONIZADO.xlsx"
+        from openpyxl import Workbook, load_workbook
+
+        blank = Workbook()
+        blank.save(path)
+        blank.close()
+        workbook = MonthlyStockWorkbook(path)
+        workbook.write([{
+            "month": month,
+            "rows": [{
+                "product_id": product_id,
+                "product": "CASINHA AZUL BEBÊ",
+                "system_stock": 12,
+                "counted": None,
+                "post_count_delta": 0,
+            }],
+            "is_current": True,
+        }])
+
+        saved = load_workbook(path, data_only=False)
+        sheet = saved[month_title(month)]
+        self.assertEqual([sheet.cell(1, column).value for column in range(1, 6)], [
+            "PRODUTO", "ESTOQUE DO SISTEMA", "CONTAGEM", "DIFERENÇA", "ESTOQUE FINAL"
+        ])
+        self.assertEqual(sheet["A2"].value, "CASINHA AZUL BEBÊ")
+        self.assertEqual(sheet["D2"].value, '=IF(C2="","",C2-B2)')
+        self.assertEqual(sheet["E2"].value, '=IF(C2="",B2,C2+G2)')
+        self.assertEqual(sheet["E3"].value, "=SUM(E2:E2)")
+        self.assertFalse(sheet["C2"].protection.locked)
+        self.assertTrue(sheet["B2"].protection.locked)
+        self.assertTrue(sheet.protection.sheet)
+        self.assertTrue(sheet.column_dimensions["F"].hidden)
+        rule_count = sum(len(sheet.conditional_formatting[key]) for key in sheet.conditional_formatting)
+        self.assertGreaterEqual(rule_count, 3)
+        sheet["C2"] = 9
+        saved.save(path)
+        saved.close()
+
+        counts = workbook.read_counts()
+        self.assertEqual(len(counts), 1)
+        self.assertEqual(counts[0].product_id, product_id)
+        self.assertEqual(counts[0].quantity, 9)
+        self.assertEqual(counts[0].month, month)
 
     def test_cloud_download_rejects_unknown_columns_without_changing_local_data(self):
         product_id = self.create_product()

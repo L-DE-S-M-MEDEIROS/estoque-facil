@@ -15,6 +15,18 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - A tabela **Posição do estoque** possui barra de rolagem própria para suportar catálogos maiores.
 - O botão de recolher produtos fica integrado à busca, com ícone de pesquisa ajustado para melhor legibilidade.
 
+## Sincronização com Excel Online
+
+O arquivo **ESTOQUE SICRONIZADO.xlsx**, salvo na pasta principal do OneDrive deste computador, é atualizado automaticamente pelo aplicativo e pode ser aberto pelo cartão **Excel Online — fechamento mensal** em **Configurações**.
+
+- O Supabase e o banco local continuam sendo a fonte oficial do estoque; a planilha oferece uma visualização simples e um campo de contagem mensal.
+- O aplicativo cria uma aba para cada mês, com o produto no formato `GRUPO/MODELO + PRODUTO + VARIAÇÃO`.
+- Cada aba possui as colunas **Produto**, **Estoque do sistema**, **Contagem**, **Diferença** e **Estoque final**, além do total do estoque final.
+- Somente a coluna **Contagem** fica liberada para digitação. Uma diferença negativa aparece em vermelho e uma positiva em verde.
+- Uma contagem digitada no Excel é trazida para o histórico do aplicativo e sincronizada com o Supabase; a correção posterior da mesma contagem atualiza o ajuste auditado.
+- Novos produtos e movimentações atualizam a planilha automaticamente. A verificação periódica evita regravar o arquivo quando nada mudou.
+- O aplicativo precisa estar aberto e o cliente do OneDrive precisa estar em execução para que as alterações sejam enviadas e recebidas pelo Excel Online.
+
 ## Recursos
 
 - Cadastro de produtos sem SKU ou código de barras
