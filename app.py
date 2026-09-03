@@ -35,7 +35,7 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.7"
+APP_VERSION = "1.2.8"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 SEARCH_RESULT_LIMIT = 18
 
@@ -2463,7 +2463,7 @@ class EstoqueApp(ctk.CTk):
         self.after_idle(self.restore_window)
         self.after(2500, lambda: self.check_updates(silent=True))
         self.after(4000, lambda: self.start_cloud_sync(silent=True))
-        self.after(6500, lambda: self.start_excel_sync(silent=True))
+        self.after(1500, lambda: self.start_excel_sync(silent=True))
         self.after(20000, self.periodic_cloud_sync)
         self.after(10000, self.periodic_excel_sync)
 
@@ -3886,10 +3886,9 @@ class EstoqueApp(ctk.CTk):
         ctk.CTkButton(cloud_actions,text="Baixar dados",width=115,height=38,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.cloud_download).pack(side="left",padx=4)
         excel=Card(page);excel.pack(fill="x",pady=(0,16));excel_row=ctk.CTkFrame(excel,fg_color="transparent");excel_row.pack(fill="x",padx=22,pady=18)
         excel_text=ctk.CTkFrame(excel_row,fg_color="transparent");excel_text.pack(fill="x")
-        ctk.CTkLabel(excel_text,text="Excel Online — fechamento mensal",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w")
+        ctk.CTkLabel(excel_text,text="Excel Online — sincronização automática",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w")
         self.excel_status=tk.StringVar();ctk.CTkLabel(excel_text,textvariable=self.excel_status,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(4,0));self.update_excel_status()
         excel_actions=ctk.CTkFrame(excel_row,fg_color="transparent");excel_actions.pack(anchor="w",pady=(12,0))
-        ctk.CTkButton(excel_actions,text="Atualizar agora",width=125,height=38,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=lambda:self.start_excel_sync(silent=False)).pack(side="left",padx=4)
         ctk.CTkButton(excel_actions,text="Abrir planilha",width=115,height=38,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=lambda:webbrowser.open(EXCEL_ONLINE_URL)).pack(side="left",padx=4)
         actions=ctk.CTkFrame(page,fg_color="transparent");actions.pack(fill="both",expand=True);actions.grid_columnconfigure((0,1),weight=1)
         for index,(title,text,icon_name,command,button) in enumerate((("Atualizações",f"Versão instalada: {APP_VERSION}. Verificação automática ao abrir.","refresh",self.check_updates,"Baixar e instalar atualização"),("Backup dos dados","Salve uma cópia segura do banco local.","download",self.backup,"Baixar backup"),("Restaurar backup","Substitua os dados por um backup anterior.","upload",self.restore,"Restaurar backup"))):
@@ -3912,7 +3911,7 @@ class EstoqueApp(ctk.CTk):
             return
         try:
             MonthlyStockWorkbook()
-            self.excel_status.set("Sincronização automática ativa — arquivo encontrado no OneDrive")
+            self.excel_status.set("Automática — Estoque atual e abas mensais acompanham o aplicativo")
         except ExcelSyncError as error:
             self.excel_status.set(str(error))
 
@@ -3922,7 +3921,7 @@ class EstoqueApp(ctk.CTk):
         if self.excel_sync_timer is not None:
             try:self.after_cancel(self.excel_sync_timer)
             except (tk.TclError,ValueError):pass
-        self.excel_sync_timer=self.after(700,lambda:self.start_excel_sync(silent=True))
+        self.excel_sync_timer=self.after(350,lambda:self.start_excel_sync(silent=True))
 
     def start_excel_sync(self, silent=True):
         if not hasattr(self, "excel_events"):
@@ -3931,7 +3930,7 @@ class EstoqueApp(ctk.CTk):
             self.excel_sync_pending=True
             return
         self.excel_sync_busy=True;self.excel_sync_pending=False;self.excel_sync_timer=None
-        self.update_excel_status("Atualizando o Excel Online...")
+        self.update_excel_status("Sincronizando automaticamente com o Excel Online...")
         counted_by=str(self.settings.get("counter_name") or "Planilha Excel")
 
         def worker():
@@ -3954,6 +3953,7 @@ class EstoqueApp(ctk.CTk):
                     output["written"]=True
                 else:
                     output={"path":str(workbook.path),"sheets":[month_title(item["month"]) for item in months],"written":False}
+                output["monthly_count"]=len(months)
                 self.excel_events.put(("success",{"imported":imported,"fingerprint":fingerprint,**output},silent))
             except (ExcelSyncError,ValueError,sqlite3.Error,OSError) as error:
                 self.excel_events.put(("error",str(error),silent))
@@ -3973,11 +3973,12 @@ class EstoqueApp(ctk.CTk):
         if kind=="success":
             imported=int(result.get("imported") or 0)
             self.excel_last_fingerprint=result.get("fingerprint")
-            self.update_excel_status(f"Planilha atualizada — {len(result.get('sheets') or [])} aba(s) mensal(is)")
+            monthly_count=int(result.get("monthly_count") or 0)
+            self.update_excel_status(f"Automática — Estoque atual + {monthly_count} aba(s) mensal(is)")
             if imported:
                 self.db.invalidate_caches();self.refresh_all();self.schedule_cloud_sync()
             if not silent:
-                message=f"Planilha atualizada no OneDrive.\n{len(result.get('sheets') or [])} aba(s) mensal(is)."
+                message=f"Planilha atualizada no OneDrive.\nEstoque atual + {monthly_count} aba(s) mensal(is)."
                 if imported:message+=f"\n{imported} contagem(ns) trazida(s) para o histórico."
                 messagebox.showinfo(APP_NAME,message,parent=self)
         else:
@@ -3987,7 +3988,7 @@ class EstoqueApp(ctk.CTk):
 
     def periodic_excel_sync(self):
         self.start_excel_sync(silent=True)
-        self.after(10000,self.periodic_excel_sync)
+        self.after(5000,self.periodic_excel_sync)
 
     def cloud_account(self):
         if self.cloud.signed_in:

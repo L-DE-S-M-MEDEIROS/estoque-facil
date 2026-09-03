@@ -10,7 +10,7 @@ from unittest.mock import patch
 import app
 from pypdf import PdfReader
 from cloud_sync import CloudSync, CloudSyncError, TABLES
-from excel_sync import MonthlyStockWorkbook, month_title
+from excel_sync import CURRENT_SHEET_TITLE, MonthlyStockWorkbook, month_title
 from premium_icons import app_icon, application_icon_path
 from PIL import Image
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
@@ -504,6 +504,23 @@ class InventoryDatabaseTests(unittest.TestCase):
         }])
 
         saved = load_workbook(path, data_only=False)
+        self.assertEqual(saved.sheetnames[0], CURRENT_SHEET_TITLE)
+        current_sheet = saved[CURRENT_SHEET_TITLE]
+        self.assertTrue(current_sheet.sheet_view.tabSelected)
+        self.assertFalse(saved[month_title(month)].sheet_view.tabSelected)
+        self.assertEqual([current_sheet.cell(1, column).value for column in range(1, 3)], [
+            "PRODUTO", "ESTOQUE ATUAL"
+        ])
+        self.assertEqual(current_sheet["A2"].value, "CASINHA AZUL BEBÊ")
+        self.assertEqual(current_sheet["B2"].value, 12)
+        self.assertEqual(current_sheet["B3"].value, "=SUM(B2:B2)")
+        self.assertTrue(current_sheet["B2"].protection.locked)
+        self.assertTrue(current_sheet.protection.sheet)
+        current_rule_count = sum(
+            len(current_sheet.conditional_formatting[key])
+            for key in current_sheet.conditional_formatting
+        )
+        self.assertGreaterEqual(current_rule_count, 1)
         sheet = saved[month_title(month)]
         self.assertEqual([sheet.cell(1, column).value for column in range(1, 6)], [
             "PRODUTO", "ESTOQUE DO SISTEMA", "CONTAGEM", "DIFERENÇA", "ESTOQUE FINAL"

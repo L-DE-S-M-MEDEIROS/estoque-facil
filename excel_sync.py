@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 
 WORKBOOK_FILENAME = "ESTOQUE SICRONIZADO.xlsx"
+CURRENT_SHEET_TITLE = "ESTOQUE ATUAL"
 EXCEL_ONLINE_URL = (
     "https://1drv.ms/x/c/74b99486c97e7a7a/"
     "IQBP69FZZxvpSJd-n362-ZLIAeb3FLFulV5v0Ie3uPDxJWQ?e=9jkgpC"
@@ -40,6 +42,7 @@ MONTH_NAMES = (
 MONTH_BY_NAME = {name: number for number, name in enumerate(MONTH_NAMES) if name}
 HEADERS = ("PRODUTO", "ESTOQUE DO SISTEMA", "CONTAGEM", "DIFERENÇA", "ESTOQUE FINAL")
 HIDDEN_HEADERS = ("ID DO PRODUTO", "MOVIMENTOS APÓS CONTAGEM", "MÊS")
+CURRENT_HEADERS = ("PRODUTO", "ESTOQUE ATUAL")
 
 
 class ExcelSyncError(RuntimeError):
@@ -161,8 +164,18 @@ class MonthlyStockWorkbook:
 
     def write(self, months: list[dict]) -> dict:
         workbook = self._load() if self.path.is_file() else Workbook()
-        written: list[str] = []
-        for position, month_data in enumerate(months):
+        current_month = next((item for item in months if item.get("is_current")), None)
+        current_rows = list((current_month or {}).get("rows") or [])
+        if CURRENT_SHEET_TITLE in workbook.sheetnames:
+            current_sheet = workbook[CURRENT_SHEET_TITLE]
+            self._reset_sheet(current_sheet)
+        else:
+            current_sheet = workbook.create_sheet(CURRENT_SHEET_TITLE, 0)
+        self._move_sheet(workbook, current_sheet, 0)
+        self._write_current(current_sheet, current_rows)
+
+        written: list[str] = [CURRENT_SHEET_TITLE]
+        for position, month_data in enumerate(months, start=1):
             key = str(month_data["month"])
             title = month_title(key)
             existing = workbook[title] if title in workbook.sheetnames else None
@@ -170,19 +183,24 @@ class MonthlyStockWorkbook:
                 sheet = workbook.create_sheet(title, position)
             else:
                 sheet = existing
-                for merged in list(sheet.merged_cells.ranges):
-                    sheet.unmerge_cells(str(merged))
-                if sheet.max_row:
-                    sheet.delete_rows(1, sheet.max_row)
-                sheet.conditional_formatting._cf_rules.clear()
-                sheet.data_validations.dataValidation = []
+                self._reset_sheet(sheet)
+            self._move_sheet(workbook, sheet, position)
             self._write_month(sheet, month_data)
             written.append(title)
 
-        if "Planilha1" in workbook.sheetnames and len(workbook.sheetnames) > 1:
-            placeholder = workbook["Planilha1"]
-            if placeholder.max_row == 1 and placeholder.max_column == 1 and placeholder["A1"].value is None:
-                workbook.remove(placeholder)
+        for placeholder_title in ("Planilha1", "Sheet"):
+            if placeholder_title in workbook.sheetnames and len(workbook.sheetnames) > 1:
+                placeholder = workbook[placeholder_title]
+                if placeholder.max_row == 1 and placeholder.max_column == 1 and placeholder["A1"].value is None:
+                    workbook.remove(placeholder)
+
+        for sheet in workbook.worksheets:
+            sheet.sheet_view.tabSelected = False
+        workbook.active = 0
+        workbook[CURRENT_SHEET_TITLE].sheet_view.tabSelected = True
+        if workbook.views:
+            workbook.views[0].activeTab = 0
+            workbook.views[0].firstSheet = 0
 
         if workbook.calculation is None:
             workbook.calculation = CalcProperties()
@@ -196,7 +214,16 @@ class MonthlyStockWorkbook:
                 temporary_path = Path(temporary.name)
             workbook.save(temporary_path)
             workbook.close()
-            os.replace(temporary_path, self.path)
+            if self.path.exists():
+                # Mantém a identidade do arquivo para o cliente do OneDrive
+                # reconhecer a alteração imediatamente, sem criar um novo item.
+                with temporary_path.open("rb") as source, self.path.open("r+b") as destination:
+                    shutil.copyfileobj(source, destination)
+                    destination.truncate()
+                    destination.flush()
+                    os.fsync(destination.fileno())
+            else:
+                os.replace(temporary_path, self.path)
         except PermissionError as error:
             raise ExcelSyncError("A planilha está ocupada. Feche o Excel e tente novamente.") from error
         except OSError as error:
@@ -205,6 +232,99 @@ class MonthlyStockWorkbook:
             if temporary_path and temporary_path.exists():
                 temporary_path.unlink(missing_ok=True)
         return {"path": str(self.path), "sheets": written}
+
+    @staticmethod
+    def _reset_sheet(sheet) -> None:
+        for merged in list(sheet.merged_cells.ranges):
+            sheet.unmerge_cells(str(merged))
+        if sheet.max_row:
+            sheet.delete_rows(1, sheet.max_row)
+        sheet.conditional_formatting._cf_rules.clear()
+        sheet.data_validations.dataValidation = []
+        sheet.auto_filter.ref = None
+
+    @staticmethod
+    def _move_sheet(workbook, sheet, position: int) -> None:
+        current_position = workbook.index(sheet)
+        if current_position != position:
+            workbook.move_sheet(sheet, offset=position - current_position)
+
+    @staticmethod
+    def _write_current(sheet, rows: list[dict]) -> None:
+        sheet.sheet_view.showGridLines = False
+        sheet.freeze_panes = "A2"
+        sheet.sheet_properties.tabColor = "00A6A6"
+        sheet.row_dimensions[1].height = 28
+        sheet.column_dimensions["A"].width = 39
+        sheet.column_dimensions["B"].width = 20
+
+        header_fill = PatternFill("solid", fgColor="1F4E78")
+        header_font = Font(name="Aptos", size=10, bold=True, color="FFFFFF")
+        thin_blue = Side(style="thin", color="7F9DB9")
+        body_border = Border(left=thin_blue, right=thin_blue, top=thin_blue, bottom=thin_blue)
+        sheet.append(CURRENT_HEADERS)
+        for cell in sheet[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = body_border
+
+        for index, item in enumerate(rows, start=2):
+            final_stock = item.get("final_stock")
+            if final_stock is None:
+                counted = item.get("counted")
+                final_stock = (
+                    item.get("system_stock")
+                    if counted is None
+                    else float(counted) + float(item.get("post_count_delta") or 0)
+                )
+            sheet.cell(index, 1, str(item["product"]))
+            sheet.cell(index, 2, float(final_stock or 0))
+            for column in range(1, 3):
+                cell = sheet.cell(index, column)
+                cell.font = Font(name="Aptos", size=10, bold=column == 1)
+                cell.border = body_border
+                cell.alignment = Alignment(
+                    horizontal="left" if column == 1 else "center", vertical="center"
+                )
+                cell.protection = Protection(locked=True)
+            sheet.cell(index, 1).fill = PatternFill(
+                "solid", fgColor="D9EAF2" if index % 2 == 0 else "EAF5FA"
+            )
+            sheet.cell(index, 2).fill = PatternFill("solid", fgColor="E2F0D9")
+            sheet.cell(index, 2).number_format = '#,##0'
+            sheet.row_dimensions[index].height = 22
+
+        last_data_row = max(2, len(rows) + 1)
+        total_row = len(rows) + 2
+        sheet.cell(total_row, 1, "TOTAL")
+        sheet.cell(total_row, 2, f"=SUM(B2:B{last_data_row})" if rows else "=0")
+        for column in range(1, 3):
+            cell = sheet.cell(total_row, column)
+            cell.fill = PatternFill("solid", fgColor="D9EAD3")
+            cell.font = Font(name="Aptos", size=11, bold=True, color="1F1F1F")
+            cell.border = Border(top=Side(style="medium", color="1F4E78"))
+            cell.alignment = Alignment(horizontal="left" if column == 1 else "center")
+            cell.protection = Protection(locked=True)
+        sheet.cell(total_row, 2).number_format = '#,##0'
+        sheet.auto_filter.ref = f"A1:B{last_data_row}"
+
+        if rows:
+            sheet.conditional_formatting.add(
+                f"B2:B{last_data_row}",
+                CellIsRule(
+                    operator="lessThan",
+                    formula=["0"],
+                    fill=PatternFill("solid", fgColor="5A0B1A"),
+                    font=Font(color="FFFFFF", bold=True),
+                ),
+            )
+
+        sheet.protection.sheet = True
+        sheet.protection.autoFilter = False
+        sheet.protection.sort = False
+        sheet.protection.selectLockedCells = True
+        sheet.protection.selectUnlockedCells = False
 
     @staticmethod
     def _write_month(sheet, month_data: dict) -> None:
