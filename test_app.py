@@ -318,6 +318,26 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertEqual(app.movement_stock_before({"resulting_stock": 42, "quantity": -8}), 50)
         self.assertEqual(app.movement_stock_before({"resulting_stock": 10, "quantity": -7}), 17)
 
+    def test_movement_history_filters_inclusive_date_range_for_batches_and_legacy_rows(self):
+        product_id = self.create_product()
+        incoming_id = int(self.db.operation("entrada")["id"])
+        with self.db.db:
+            legacy = self.db.db.execute("""INSERT INTO movements(product_id,type,quantity,resulting_stock,informed_quantity,movement_date,reason,checked_by,created_at,operation_id,batch_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?,NULL)""",(product_id,"entrada",2,2,None,"2026-08-01","Recebimento antigo","Ana","2026-08-01T09:00:00",incoming_id))
+            legacy_id = int(legacy.lastrowid)
+            self.db._recalculate_product(product_id)
+        first_batch = self.db.add_movement_batch("saida",[(product_id,1)],"2026-08-10","Pedido 10","Bia")
+        second_batch = self.db.add_movement_batch("entrada",[(product_id,3)],"2026-08-20","Recebimento 20","Caio")
+
+        exact_day = self.db.movement_history("todos","2026-08-10","2026-08-10")
+        self.assertEqual([item["history_key"] for item in exact_day],[f"batch:{first_batch}"])
+        from_day = {item["history_key"] for item in self.db.movement_history("todos","2026-08-10")}
+        self.assertEqual(from_day,{f"batch:{first_batch}",f"batch:{second_batch}"})
+        through_day = {item["history_key"] for item in self.db.movement_history("todos",end_date="2026-08-10")}
+        self.assertEqual(through_day,{f"movement:{legacy_id}",f"batch:{first_batch}"})
+        incoming = {item["history_key"] for item in self.db.movement_history(incoming_id,"2026-08-01","2026-08-20")}
+        self.assertEqual(incoming,{f"movement:{legacy_id}",f"batch:{second_batch}"})
+
     def test_closed_movement_history_updates_and_deletes_whole_batch(self):
         first_id = self.create_product(name="MARINHO")
         self.db.save_product({"name":"VERDE","category":"Bolsa maternidade","group_name":"4 PEÇAS","variant":"Verde","unit":"un","minimum":0,"photo":"","notes":""})

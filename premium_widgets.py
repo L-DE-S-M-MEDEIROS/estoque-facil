@@ -603,9 +603,10 @@ class MaskedDateEntry(ctk.CTkFrame):
     """Date input that always preserves the dd/mm/yy separators."""
     def __init__(self, master, colors: dict, initial: date | None = None, **kwargs):
         control_height = kwargs.pop("control_height", 40)
+        self.allow_empty = kwargs.pop("allow_empty", False)
         super().__init__(master, fg_color="transparent", **kwargs)
         self.colors = colors
-        self.digits = list((initial or date.today()).strftime("%d%m%y"))
+        self.digits = [] if self.allow_empty and initial is None else list((initial or date.today()).strftime("%d%m%y"))
         self.variable = tk.StringVar()
         self.entry = ctk.CTkEntry(self, textvariable=self.variable, height=control_height, corner_radius=9, border_color=colors["border"], fg_color=colors["surface"], font=ctk.CTkFont("Inter", 12))
         self.entry.pack(side="left", fill="x", expand=True)
@@ -653,12 +654,25 @@ class MaskedDateEntry(ctk.CTkFrame):
         return "break"
 
     def get_date(self) -> date:
+        value = self.get_optional_date()
+        if value is None:
+            raise ValueError("Preencha a data completa no formato dd/mm/aa.")
+        return value
+
+    def get_optional_date(self) -> date | None:
         text = self.formatted()
+        if self.allow_empty and all(character == "_" for character in text if character != "/"):
+            return None
         if "_" in text: raise ValueError("Preencha a data completa no formato dd/mm/aa.")
         return datetime.strptime(text, "%d/%m/%y").date()
 
     def set_date(self, value: date):
         self.digits = list(value.strftime("%d%m%y")); self.refresh(6)
+
+    def clear(self):
+        if not self.allow_empty:
+            raise ValueError("Este campo de data não pode ficar vazio.")
+        self.digits = []; self.refresh(0)
 
     def open_calendar(self):
         try: selected = self.get_date()

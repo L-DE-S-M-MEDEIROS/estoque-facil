@@ -35,7 +35,7 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.9"
+APP_VERSION = "1.2.10"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 SEARCH_RESULT_LIMIT = 18
 
@@ -323,6 +323,14 @@ def relative_past_date(value: str, today: date | None = None) -> str:
         return f"{months} mês atrás" if months == 1 else f"{months} meses atrás"
     years = days // 365
     return f"{years} ano atrás" if years == 1 else f"{years} anos atrás"
+
+
+def optional_iso_date(value: object) -> date | None:
+    """Read a persisted ISO date without letting stale settings break the UI."""
+    try:
+        return date.fromisoformat(str(value)) if value else None
+    except ValueError:
+        return None
 
 
 def product_label(product: sqlite3.Row) -> str:
@@ -1616,10 +1624,26 @@ class Database:
             LEFT JOIN operation_types o ON o.id=m.operation_id
             WHERE m.batch_id=? ORDER BY m.created_at,m.id""", (batch_id,)).fetchall()
 
-    def movement_history(self, operation: int | str = "todos") -> list[dict]:
-        batch_where, legacy_where, args = ("", "", ()) if operation == "todos" else (
-            "WHERE mb.operation_id=?", "AND m.operation_id=?", (int(operation),)
-        )
+    def movement_history(
+        self,
+        operation: int | str = "todos",
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[dict]:
+        batch_conditions, batch_args = [], []
+        legacy_conditions, legacy_args = ["m.batch_id IS NULL"], []
+        if operation != "todos":
+            operation_id = int(operation)
+            batch_conditions.append("mb.operation_id=?"); batch_args.append(operation_id)
+            legacy_conditions.append("m.operation_id=?"); legacy_args.append(operation_id)
+        if start_date:
+            batch_conditions.append("mb.movement_date>=?"); batch_args.append(start_date)
+            legacy_conditions.append("m.movement_date>=?"); legacy_args.append(start_date)
+        if end_date:
+            batch_conditions.append("mb.movement_date<=?"); batch_args.append(end_date)
+            legacy_conditions.append("m.movement_date<=?"); legacy_args.append(end_date)
+        batch_where = f"WHERE {' AND '.join(batch_conditions)}" if batch_conditions else ""
+        legacy_where = f"WHERE {' AND '.join(legacy_conditions)}"
         batches = self.db.execute(f"""SELECT mb.id batch_id,NULL movement_id,mb.movement_date,mb.reason,
             mb.performed_by checked_by,mb.created_at,COALESCE(o.name,'Operação removida') operation_name,
             COUNT(m.id) item_count,
@@ -1629,13 +1653,13 @@ class Database:
             JOIN products p ON p.id=m.product_id
             LEFT JOIN operation_types o ON o.id=mb.operation_id
             {batch_where}
-            GROUP BY mb.id""", args).fetchall()
+            GROUP BY mb.id""", tuple(batch_args)).fetchall()
         legacy = self.db.execute(f"""SELECT NULL batch_id,m.id movement_id,m.movement_date,m.reason,m.checked_by,m.created_at,
             COALESCE(o.name,CASE m.type WHEN 'entrada' THEN 'Entrada' WHEN 'saida' THEN 'Saída' WHEN 'ajuste' THEN 'Ajuste' ELSE 'Inventário' END) operation_name,
             1 item_count,CASE WHEN TRIM(COALESCE(p.group_name,''))<>'' THEN p.group_name||' • '||p.name ELSE p.name END product_summary
             FROM movements m JOIN products p ON p.id=m.product_id
             LEFT JOIN operation_types o ON o.id=m.operation_id
-            WHERE m.batch_id IS NULL {legacy_where}""", args).fetchall()
+            {legacy_where}""", tuple(legacy_args)).fetchall()
         history = []
         for row in (*batches, *legacy):
             item = dict(row)
@@ -2516,6 +2540,10 @@ class EstoqueApp(ctk.CTk):
         if hasattr(self,"kit_mode"):self.settings["kit_conversion_mode"] = self.kit_mode.get()
         if hasattr(self,"kit_user"):self.settings["kit_conversion_user"] = self.kit_user.get()
         if hasattr(self,"history_filter"):self.settings["history_filter"] = self.history_filter.get()
+        if hasattr(self,"history_date_range"):
+            history_start,history_end=self.history_date_range
+            self.settings["history_start_date"] = history_start.isoformat() if history_start else ""
+            self.settings["history_end_date"] = history_end.isoformat() if history_end else ""
         if hasattr(self,"product_suggestions_collapsed"):self.settings["movement_products_expanded"] = not self.product_suggestions_collapsed
 
     def save_interface_state(self):self.capture_interface_preferences();self.schedule_settings_save()
@@ -3598,6 +3626,26 @@ class EstoqueApp(ctk.CTk):
         self.history_filter_menu = ctk.CTkOptionMenu(bar, variable=self.history_filter, values=["Todas as operações"], width=175, height=36, fg_color=COLORS["surface_alt"], button_color=COLORS["surface_hover"], text_color=COLORS["text"], command=lambda _value:(self.refresh_movements(),self.save_interface_state()))
         self.history_filter_menu.pack(side="right")
         ctk.CTkButton(bar, text="Abrir detalhes", image=self.icons["expand"], width=135, height=36, corner_radius=9, fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], command=self.open_history_details).pack(side="right", padx=(8, 8))
+
+        saved_history_start=optional_iso_date(self.settings.get("history_start_date"))
+        saved_history_end=optional_iso_date(self.settings.get("history_end_date"))
+        if saved_history_start and saved_history_end and saved_history_start>saved_history_end:
+            saved_history_start,saved_history_end=None,None
+        self.history_date_range=(saved_history_start,saved_history_end)
+        date_filters=ctk.CTkFrame(history,fg_color="transparent")
+        date_filters.pack(fill="x",padx=20,pady=(0,12))
+        ctk.CTkLabel(date_filters,text="Filtrar por data",text_color=COLORS["text"],font=ctk.CTkFont("Inter",11,"bold")).pack(side="left",padx=(0,12))
+        ctk.CTkLabel(date_filters,text="De",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(side="left",padx=(0,6))
+        self.history_start_date_entry=MaskedDateEntry(date_filters,COLORS,initial=saved_history_start,allow_empty=True,control_height=36,width=175)
+        self.history_start_date_entry.pack(side="left",padx=(0,12))
+        ctk.CTkLabel(date_filters,text="Até",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(side="left",padx=(0,6))
+        self.history_end_date_entry=MaskedDateEntry(date_filters,COLORS,initial=saved_history_end,allow_empty=True,control_height=36,width=175)
+        self.history_end_date_entry.pack(side="left",padx=(0,10))
+        ctk.CTkButton(date_filters,text="Filtrar",width=82,height=36,corner_radius=9,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.apply_history_date_filter).pack(side="left")
+        ctk.CTkButton(date_filters,text="Limpar",width=78,height=36,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.clear_history_date_filter).pack(side="left",padx=(8,0))
+        self.history_period_status=ctk.CTkLabel(date_filters,text="",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10))
+        self.history_period_status.pack(side="left",padx=(14,0))
+        self.update_history_period_status()
         self.history_tree = self.table(history, ("date", "operation", "items", "products", "user", "reason"), ("Data", "Operação", "Itens", "Produtos do conjunto", "Usuário", "Observação"), (85, 130, 70, 390, 135, 220))
         self.history_tree.column("products", anchor="w")
         self.history_tree.column("reason", anchor="w")
@@ -3862,6 +3910,33 @@ class EstoqueApp(ctk.CTk):
         except ValueError as error:messagebox.showwarning(APP_NAME,str(error),parent=self);return
         self.refresh_all();self.update_current_stock();self.show_movement_result("Movimentação excluída.")
 
+    def update_history_period_status(self):
+        if not hasattr(self,"history_period_status"):return
+        history_start,history_end=getattr(self,"history_date_range",(None,None))
+        if history_start and history_end:
+            if history_start==history_end:text=f"Dia {history_start.strftime('%d/%m/%y')}"
+            else:text=f"{history_start.strftime('%d/%m/%y')} a {history_end.strftime('%d/%m/%y')}"
+        elif history_start:text=f"A partir de {history_start.strftime('%d/%m/%y')}"
+        elif history_end:text=f"Até {history_end.strftime('%d/%m/%y')}"
+        else:text="Todas as datas"
+        self.history_period_status.configure(text=text)
+
+    def apply_history_date_filter(self):
+        try:
+            history_start=self.history_start_date_entry.get_optional_date()
+            history_end=self.history_end_date_entry.get_optional_date()
+        except ValueError:
+            messagebox.showwarning(APP_NAME,"Preencha as datas completas no formato DD/MM/AA ou deixe os campos vazios.",parent=self);return
+        if history_start and history_end and history_start>history_end:
+            messagebox.showwarning(APP_NAME,"A data inicial não pode ser posterior à data final.",parent=self);return
+        self.history_date_range=(history_start,history_end)
+        self.update_history_period_status();self.refresh_movements();self.save_interface_state()
+
+    def clear_history_date_filter(self):
+        self.history_start_date_entry.clear();self.history_end_date_entry.clear()
+        self.history_date_range=(None,None)
+        self.update_history_period_status();self.refresh_movements();self.save_interface_state()
+
     def refresh_movements(self):
         if not hasattr(self,"history_tree"):return
         self.refresh_user_controls()
@@ -3870,7 +3945,8 @@ class EstoqueApp(ctk.CTk):
         if self.current_page!="movements" or self.settings.get("movement_section","new")!="history":return
         self.history_tree.delete(*self.history_tree.get_children())
         operation_filter=getattr(self,"history_operation_mapping",{}).get(self.history_filter.get(),"todos")
-        for movement in self.db.movement_history(operation_filter):
+        history_start,history_end=getattr(self,"history_date_range",(None,None))
+        for movement in self.db.movement_history(operation_filter,history_start.isoformat() if history_start else None,history_end.isoformat() if history_end else None):
             item_count=int(movement["item_count"]);item_label=f"{item_count} {'produto' if item_count==1 else 'produtos'}"
             self.history_tree.insert("","end",iid=movement["history_key"],values=(datetime.strptime(movement["movement_date"],"%Y-%m-%d").strftime("%d/%m/%y"),movement["operation_name"],item_label,movement["product_summary"],movement["checked_by"]or"—",movement["reason"]or"Sem observação"))
 
