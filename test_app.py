@@ -313,12 +313,21 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertEqual(self.db.stock(lower_id), 5)
         self.assertEqual(self.db.stock(higher_id), 0)
 
+    def test_movement_stock_before_is_recovered_for_entries_and_exits(self):
+        self.assertEqual(app.movement_stock_before({"resulting_stock": 54, "quantity": 4}), 50)
+        self.assertEqual(app.movement_stock_before({"resulting_stock": 42, "quantity": -8}), 50)
+        self.assertEqual(app.movement_stock_before({"resulting_stock": 10, "quantity": -7}), 17)
+
     def test_closed_movement_history_updates_and_deletes_whole_batch(self):
         first_id = self.create_product(name="MARINHO")
         self.db.save_product({"name":"VERDE","category":"Bolsa maternidade","group_name":"4 PEÇAS","variant":"Verde","unit":"un","minimum":0,"photo":"","notes":""})
         second_id = int(self.db.db.execute("SELECT MAX(id) id FROM products").fetchone()["id"])
         self.db.add_movement_batch("inventario", [(first_id, 10), (second_id, 8)], "2026-08-20", "Contagem inicial", "Ana")
         sale_id = self.db.add_movement_batch("saida", [(first_id, 3), (second_id, 2)], "2026-08-21", "Pedido 15", "Vinicius")
+
+        sale_items = self.db.movement_batch_items(sale_id)
+        self.assertEqual(app.movement_stock_before(sale_items[0]), 10)
+        self.assertEqual(app.movement_stock_before(sale_items[1]), 8)
 
         history = self.db.movement_history()
         sale = next(item for item in history if item["history_key"] == f"batch:{sale_id}")

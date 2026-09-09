@@ -35,7 +35,7 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.8"
+APP_VERSION = "1.2.9"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 SEARCH_RESULT_LIMIT = 18
 
@@ -275,6 +275,12 @@ def data_dir() -> Path:
 def fmt_number(value: float) -> str:
     number = float(value)
     return str(int(number)) if number.is_integer() else f"{number:.3f}".rstrip("0").rstrip(".").replace(".", ",")
+
+
+def movement_stock_before(movement) -> float:
+    """Recover the balance immediately before a stored ledger movement."""
+
+    return float(movement["resulting_stock"]) - float(movement["quantity"])
 
 
 def normalize_search_text(value: object) -> str:
@@ -2368,13 +2374,13 @@ class MovementHistoryDialog(BrandedToplevel):
 
         listing = Card(content); listing.grid(row=1, column=0, sticky="nsew")
         ctk.CTkLabel(listing, text="Produtos incluídos", text_color=COLORS["text"], font=ctk.CTkFont("Inter", 15, "bold")).pack(anchor="w", padx=18, pady=(16, 10))
-        self.tree = parent.table(listing, ("product", "informed", "change", "stock"), ("Produto", "Quantidade informada", "Alteração", "Saldo após"), (360, 145, 120, 120))
+        self.tree = parent.table(listing, ("product", "stock_before", "change", "stock_after"), ("Produto", "Estoque antes", "Alteração", "Saldo após"), (340, 135, 130, 140))
         self.tree.column("product", anchor="w")
         self.tree.pack(fill="both", expand=True, padx=18, pady=(0, 16))
         for item in items:
             quantity = float(item["quantity"])
-            informed = abs(quantity) if item["type"] in ("entrada", "saida") else float(item["informed_quantity"] if item["informed_quantity"] is not None else item["resulting_stock"])
-            self.tree.insert("", "end", values=(product_label(item), fmt_number(informed), f"{'+' if quantity > 0 else ''}{fmt_number(quantity)} {item['unit']}", f"{fmt_number(item['resulting_stock'])} {item['unit']}"))
+            stock_before = movement_stock_before(item)
+            self.tree.insert("", "end", values=(product_label(item), f"{fmt_number(stock_before)} {item['unit']}", f"{'+' if quantity > 0 else ''}{fmt_number(quantity)} {item['unit']}", f"{fmt_number(item['resulting_stock'])} {item['unit']}"))
 
         actions = ctk.CTkFrame(content, fg_color="transparent"); actions.grid(row=2, column=0, sticky="ew", pady=(14, 0))
         ctk.CTkButton(actions, text="Fechar", width=100, height=40, fg_color=COLORS["surface_alt"], hover_color=COLORS["surface_hover"], text_color=COLORS["text"], command=self.destroy).pack(side="left")

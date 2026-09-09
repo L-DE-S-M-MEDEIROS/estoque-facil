@@ -51,6 +51,7 @@ O arquivo **ESTOQUE SICRONIZADO.xlsx**, salvo na pasta principal do OneDrive des
 - Soma em tempo real da quantidade total de itens informados na movimentação
 - Páginas internas separadas para **Nova movimentação** e **Histórico**, preservando o padrão visual do aplicativo
 - Histórico consolidado: cada linha representa uma movimentação fechada, com janela de detalhes dos produtos
+- Nos detalhes do histórico, cada produto mostra Estoque antes, Alteração e Saldo após para facilitar a conferência da movimentação
 - Edição e exclusão do conjunto completo, com recálculo seguro de todos os saldos envolvidos
 - Importação de listas PDF da Shopee e do Mercado Livre usando apenas SKU e quantidade
 - Leitura posicional da Lista Shopee, inclusive quando o SKU ocupa mais de uma linha
