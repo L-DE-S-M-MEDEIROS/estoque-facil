@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import ctypes
 import math
 import os
@@ -29,15 +30,28 @@ from premium_icons import app_icon, application_icon_path, brand_mark, icon
 from premium_widgets import MaskedDateEntry, SmoothScrollableFrame, TreeConfidenceOverlay, TreeRelativeDateOverlay, TreeRowSeparatorOverlay, TreeStockOverlay, confidence_tier, tree_wheel_units
 from cloud_sync import CloudSync, CloudSyncError
 from database_utils import configure_database_connection, database_integrity_errors, normalize_identity_text
-from excel_sync import EXCEL_ONLINE_URL, ExcelSyncError, MonthlyStockWorkbook, combined_product_name, month_last_day, month_title, workbook_data_fingerprint
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
 from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.10"
+APP_VERSION = "1.2.11"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
+GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1eXMlyvFpO_-MkD8oaux1NrlupqR-ECNyEZS1XSgJIiY/edit?usp=sharing"
 SEARCH_RESULT_LIMIT = 18
+
+
+def month_last_day(month: str) -> str:
+    year, number = (int(part) for part in month.split("-"))
+    return f"{year:04d}-{number:02d}-{calendar.monthrange(year, number)[1]:02d}"
+
+
+def combined_product_name(product: dict) -> str:
+    return " ".join(
+        str(product.get(key) or "").strip()
+        for key in ("group_name", "name", "variant")
+        if str(product.get(key) or "").strip()
+    ).upper()
 
 KIT_PIECE_COUNTS = (2, 4, 5)
 KIT_INTERNAL_OPERATIONS = {
@@ -1178,7 +1192,7 @@ class Database:
         counted = float(counted_quantity)
         if not math.isfinite(counted) or counted < 0:
             raise ValueError("A quantidade contada não pode ser negativa.")
-        responsible = " ".join(str(counted_by or "").strip().split()) or "Planilha Excel"
+        responsible = " ".join(str(counted_by or "").strip().split()) or "Contagem mensal"
         today = date.today()
         if count_month > today.strftime("%Y-%m"):
             raise ValueError("Não é possível registrar contagem em um mês futuro.")
@@ -1199,7 +1213,7 @@ class Database:
                 "inventario",
                 [(product_id, counted)],
                 str(existing["count_date"]),
-                "Contagem mensal pelo Excel Online",
+                "Contagem mensal",
                 responsible,
             )
             difference = counted - system_stock
@@ -1215,7 +1229,7 @@ class Database:
             "inventario",
             [(product_id, counted)],
             effective_date,
-            "Contagem mensal pelo Excel Online",
+            "Contagem mensal",
             responsible,
         )
         difference = counted - system_stock
@@ -2487,15 +2501,12 @@ class EstoqueApp(ctk.CTk):
         self._ui_jobs: dict[str, str] = {}
         self.update_events: queue.Queue = queue.Queue(); self.update_busy = False; self.update_button = None
         self.cloud_events: queue.Queue = queue.Queue(); self.cloud_sync_busy = False; self.cloud_sync_pending = False; self.cloud_sync_timer = None
-        self.excel_events: queue.Queue = queue.Queue(); self.excel_sync_busy = False; self.excel_sync_pending = False; self.excel_sync_timer = None; self.excel_last_fingerprint = None
         self.nav_buttons = {}; self.pages = {}; self.current_page = ""; self.build_shell(); self.show_page(self.settings.get("last_page", "stock"))
         self.bind("<Configure>", self.remember_window_geometry)
         self.after_idle(self.restore_window)
         self.after(2500, lambda: self.check_updates(silent=True))
-        self.after(4000, lambda: self.start_cloud_sync(silent=True))
-        self.after(1500, lambda: self.start_excel_sync(silent=True))
+        self.after(1500, lambda: self.start_cloud_sync(silent=True))
         self.after(20000, self.periodic_cloud_sync)
-        self.after(10000, self.periodic_excel_sync)
 
     def save_settings(self): self.preferences_store.save(); self.settings = self.preferences_store.values
 
@@ -2524,8 +2535,9 @@ class EstoqueApp(ctk.CTk):
     def save_cloud_settings(self): self.cloud_session_store.values = self.cloud_settings; self.cloud_session_store.save(); self.cloud_settings = self.cloud_session_store.values
 
     def schedule_data_sync(self):
+        # O Supabase é a fonte central; o Google Planilhas consulta essa cópia
+        # online diretamente e não depende deste computador.
         self.schedule_cloud_sync()
-        self.schedule_excel_sync()
 
     def capture_interface_preferences(self):
         if self.current_page:self.settings["last_page"] = self.current_page
@@ -2580,7 +2592,7 @@ class EstoqueApp(ctk.CTk):
             font_size = 11 if key in ("defect_return", "kit_conversion") else 13
             button = ctk.CTkButton(self.sidebar, text=label, image=self.icons[key], compound="left", anchor="w", height=48, corner_radius=10, fg_color="transparent", hover_color=COLORS["surface_hover"], text_color=COLORS["muted"], font=ctk.CTkFont("Inter", font_size, "bold"), command=lambda k=key:self.show_page(k))
             button.pack(fill="x", padx=16, pady=4); self.nav_buttons[key]=button
-        self.sidebar_status=ctk.CTkLabel(self.sidebar, text=f"●  Local + nuvem segura\n    Versão {APP_VERSION}", justify="left", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10));self.sidebar_status.pack(side="bottom", anchor="w", padx=26, pady=28)
+        self.sidebar_status=ctk.CTkLabel(self.sidebar, text=f"●  Estoque online compartilhado\n    Versão {APP_VERSION}", justify="left", text_color=COLORS["muted"], font=ctk.CTkFont("Inter", 10));self.sidebar_status.pack(side="bottom", anchor="w", padx=26, pady=28)
         self.content = ctk.CTkFrame(self, fg_color=COLORS["background"], corner_radius=0); self.content.grid(row=0,column=1,sticky="nsew"); self.content.grid_columnconfigure(0,weight=1); self.content.grid_rowconfigure(0,weight=1)
 
     def show_page(self,key):
@@ -3960,18 +3972,19 @@ class EstoqueApp(ctk.CTk):
         appearance=Card(page);appearance.pack(fill="x",pady=(0,16));row=ctk.CTkFrame(appearance,fg_color="transparent");row.pack(fill="x",padx=22,pady=20);ctk.CTkLabel(row,text="Tema da interface",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w");ctk.CTkLabel(row,text="Escolha entre o modo claro off-white e o modo escuro em grafite.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(4,4));ctk.CTkLabel(row,text="Tema, janela, última tela e filtros ficam somente neste usuário do Windows e não são enviados ao Supabase.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(anchor="w",pady=(0,12));self.theme_selector=ctk.CTkSegmentedButton(row,values=["Light","Dark"],command=self.change_theme,selected_color=COLORS["accent"],selected_hover_color=COLORS["accent_hover"]);self.theme_selector.pack(anchor="w");self.theme_selector.set(self.settings.get("theme","Light"))
         cloud=Card(page);cloud.pack(fill="x",pady=(0,16));cloud_row=ctk.CTkFrame(cloud,fg_color="transparent");cloud_row.pack(fill="x",padx=22,pady=20)
         cloud_text=ctk.CTkFrame(cloud_row,fg_color="transparent");cloud_text.pack(side="left",fill="x",expand=True)
-        ctk.CTkLabel(cloud_text,text="Supabase — cópia na nuvem",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w")
+        ctk.CTkLabel(cloud_text,text="Supabase — estoque online compartilhado",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w")
         self.cloud_status=tk.StringVar();ctk.CTkLabel(cloud_text,textvariable=self.cloud_status,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(4,0));self.update_cloud_status()
         cloud_actions=ctk.CTkFrame(cloud_row,fg_color="transparent");cloud_actions.pack(side="right")
         ctk.CTkButton(cloud_actions,text="Conta",width=90,height=38,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.cloud_account).pack(side="left",padx=4)
         ctk.CTkButton(cloud_actions,text="Enviar dados",width=115,height=38,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.cloud_upload).pack(side="left",padx=4)
         ctk.CTkButton(cloud_actions,text="Baixar dados",width=115,height=38,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.cloud_download).pack(side="left",padx=4)
-        excel=Card(page);excel.pack(fill="x",pady=(0,16));excel_row=ctk.CTkFrame(excel,fg_color="transparent");excel_row.pack(fill="x",padx=22,pady=18)
-        excel_text=ctk.CTkFrame(excel_row,fg_color="transparent");excel_text.pack(fill="x")
-        ctk.CTkLabel(excel_text,text="Excel Online — sincronização automática",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w")
-        self.excel_status=tk.StringVar();ctk.CTkLabel(excel_text,textvariable=self.excel_status,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(4,0));self.update_excel_status()
-        excel_actions=ctk.CTkFrame(excel_row,fg_color="transparent");excel_actions.pack(anchor="w",pady=(12,0))
-        ctk.CTkButton(excel_actions,text="Abrir planilha",width=115,height=38,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=lambda:webbrowser.open(EXCEL_ONLINE_URL)).pack(side="left",padx=4)
+        sheets=Card(page);sheets.pack(fill="x",pady=(0,16));sheets_row=ctk.CTkFrame(sheets,fg_color="transparent");sheets_row.pack(fill="x",padx=22,pady=18)
+        sheets_text=ctk.CTkFrame(sheets_row,fg_color="transparent");sheets_text.pack(fill="x")
+        ctk.CTkLabel(sheets_text,text="Google Planilhas — estoque online",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w")
+        self.google_sheets_status=tk.StringVar(value="Atualização automática pelo Supabase — sem Excel, OneDrive ou computador ligado")
+        ctk.CTkLabel(sheets_text,textvariable=self.google_sheets_status,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(4,0))
+        sheets_actions=ctk.CTkFrame(sheets_row,fg_color="transparent");sheets_actions.pack(anchor="w",pady=(12,0))
+        ctk.CTkButton(sheets_actions,text="Abrir Google Planilhas",width=165,height=38,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=lambda:webbrowser.open(GOOGLE_SHEETS_URL)).pack(side="left",padx=4)
         actions=ctk.CTkFrame(page,fg_color="transparent");actions.pack(fill="both",expand=True);actions.grid_columnconfigure((0,1),weight=1)
         for index,(title,text,icon_name,command,button) in enumerate((("Atualizações",f"Versão instalada: {APP_VERSION}. Verificação automática ao abrir.","refresh",self.check_updates,"Baixar e instalar atualização"),("Backup dos dados","Salve uma cópia segura do banco local.","download",self.backup,"Baixar backup"),("Restaurar backup","Substitua os dados por um backup anterior.","upload",self.restore,"Restaurar backup"))):
             card=Card(actions);card.grid(row=index//2,column=index%2,sticky="nsew",padx=(0 if index%2==0 else 8,8 if index%2==0 else 0),pady=8);ctk.CTkLabel(card,text=title,image=self.icons[icon_name],compound="left",text_color=COLORS["text"],font=ctk.CTkFont("Inter",14,"bold")).pack(anchor="w",padx=20,pady=(20,5));ctk.CTkLabel(card,text=text,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(anchor="w",padx=20)
@@ -3984,93 +3997,6 @@ class EstoqueApp(ctk.CTk):
     def update_cloud_status(self):
         if hasattr(self,"cloud_status"):
             self.cloud_status.set(f"Conectado como {self.cloud.email} — estoque compartilhado e automático" if self.cloud.signed_in else "Desconectado — entre ou crie sua conta segura")
-
-    def update_excel_status(self, message: str | None = None):
-        if not hasattr(self, "excel_status"):
-            return
-        if message:
-            self.excel_status.set(message)
-            return
-        try:
-            MonthlyStockWorkbook()
-            self.excel_status.set("Automática — Estoque atual e abas mensais acompanham o aplicativo")
-        except ExcelSyncError as error:
-            self.excel_status.set(str(error))
-
-    def schedule_excel_sync(self):
-        if not hasattr(self, "excel_events"):
-            return
-        if self.excel_sync_timer is not None:
-            try:self.after_cancel(self.excel_sync_timer)
-            except (tk.TclError,ValueError):pass
-        self.excel_sync_timer=self.after(350,lambda:self.start_excel_sync(silent=True))
-
-    def start_excel_sync(self, silent=True):
-        if not hasattr(self, "excel_events"):
-            return
-        if self.excel_sync_busy:
-            self.excel_sync_pending=True
-            return
-        self.excel_sync_busy=True;self.excel_sync_pending=False;self.excel_sync_timer=None
-        self.update_excel_status("Sincronizando automaticamente com o Excel Online...")
-        counted_by=str(self.settings.get("counter_name") or "Planilha Excel")
-
-        def worker():
-            database=None
-            try:
-                database=Database(self.db.path)
-                workbook=MonthlyStockWorkbook()
-                imported=0
-                for entry in workbook.read_counts():
-                    result=database.save_monthly_count(entry.product_id,entry.month,entry.quantity,counted_by)
-                    imported+=bool(result.get("changed"))
-                months=[{
-                    "month":month,
-                    "rows":database.monthly_stock_rows(month),
-                    "is_current":month==date.today().strftime("%Y-%m"),
-                } for month in database.workbook_months()]
-                fingerprint=workbook_data_fingerprint(months)
-                if imported or fingerprint != self.excel_last_fingerprint:
-                    output=workbook.write(months)
-                    output["written"]=True
-                else:
-                    output={"path":str(workbook.path),"sheets":[month_title(item["month"]) for item in months],"written":False}
-                output["monthly_count"]=len(months)
-                self.excel_events.put(("success",{"imported":imported,"fingerprint":fingerprint,**output},silent))
-            except (ExcelSyncError,ValueError,sqlite3.Error,OSError) as error:
-                self.excel_events.put(("error",str(error),silent))
-            finally:
-                if database is not None:
-                    database.db.close()
-
-        threading.Thread(target=worker,daemon=True).start();self.after(120,self.poll_excel_sync_events)
-
-    def poll_excel_sync_events(self):
-        try:event=self.excel_events.get_nowait()
-        except queue.Empty:
-            if self.excel_sync_busy:self.after(120,self.poll_excel_sync_events)
-            return
-        kind,result,silent=event
-        self.excel_sync_busy=False
-        if kind=="success":
-            imported=int(result.get("imported") or 0)
-            self.excel_last_fingerprint=result.get("fingerprint")
-            monthly_count=int(result.get("monthly_count") or 0)
-            self.update_excel_status(f"Automática — Estoque atual + {monthly_count} aba(s) mensal(is)")
-            if imported:
-                self.db.invalidate_caches();self.refresh_all();self.schedule_cloud_sync()
-            if not silent:
-                message=f"Planilha atualizada no OneDrive.\nEstoque atual + {monthly_count} aba(s) mensal(is)."
-                if imported:message+=f"\n{imported} contagem(ns) trazida(s) para o histórico."
-                messagebox.showinfo(APP_NAME,message,parent=self)
-        else:
-            self.update_excel_status(str(result))
-            if not silent:messagebox.showerror(APP_NAME,str(result),parent=self)
-        if self.excel_sync_pending:self.after(300,lambda:self.start_excel_sync(silent=True))
-
-    def periodic_excel_sync(self):
-        self.start_excel_sync(silent=True)
-        self.after(5000,self.periodic_excel_sync)
 
     def cloud_account(self):
         if self.cloud.signed_in:
@@ -4125,7 +4051,6 @@ class EstoqueApp(ctk.CTk):
         if kind=="success":
             action=result.get("action")
             if action=="downloaded":self.refresh_all()
-            self.schedule_excel_sync()
             if not silent:
                 messages={"uploaded":"Dados locais enviados ao estoque compartilhado.","downloaded":"Este computador recebeu os dados mais recentes dos outros usuários.","unchanged":"Todos os usuários já estão sincronizados."}
                 messagebox.showinfo(APP_NAME,messages.get(action,"Sincronização concluída."),parent=self)

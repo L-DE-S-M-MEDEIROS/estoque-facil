@@ -1,0 +1,3 @@
+[functions.google-sheets-sync]
+# A função valida o token OAuth do Google e a planilha autorizada internamente.
+verify_jwt = false

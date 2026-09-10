@@ -4,9 +4,9 @@ Aplicativo desktop nativo para Windows, desenvolvido em Python com Tkinter e SQL
 
 ## Sincronização com Supabase
 
-Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** para criar ou entrar em uma conta. Todos os usuários autenticados neste aplicativo compartilham o mesmo estoque, e produtos, movimentações, cadastros e fotos são sincronizados automaticamente no projeto separado `Estoque Bolsas Baby`.
+Na página **Configurações**, use o cartão **Supabase — estoque online compartilhado** para criar ou entrar em uma conta. Todos os usuários autenticados neste aplicativo compartilham o mesmo estoque, e produtos, movimentações, cadastros e fotos são sincronizados automaticamente no projeto separado `Estoque Bolsas Baby`.
 
-- O aplicativo continua funcionando localmente sem internet.
+- O SQLite local é apenas um cache operacional; o Supabase é a fonte central para operar em qualquer computador.
 - Todas as contas autenticadas do aplicativo acessam o estoque compartilhado; usuários anônimos continuam bloqueados por Row Level Security (RLS).
 - Ao entrar, ao alterar dados e a cada 20 segundos, o aplicativo compara a cópia local com a nuvem e atualiza os outros computadores.
 - A senha não é armazenada; somente a sessão de acesso fica salva neste computador.
@@ -15,18 +15,19 @@ Na página **Configurações**, use o cartão **Supabase — cópia na nuvem** p
 - A tabela **Posição do estoque** possui barra de rolagem própria para suportar catálogos maiores.
 - O botão de recolher produtos fica integrado à busca, com ícone de pesquisa ajustado para melhor legibilidade.
 
-## Sincronização com Excel Online
+## Visualização online no Google Planilhas
 
-O arquivo **ESTOQUE SICRONIZADO.xlsx**, salvo na pasta principal do OneDrive deste computador, é atualizado automaticamente pelo aplicativo e pode ser aberto pelo cartão **Excel Online — sincronização automática** em **Configurações**. Não é necessário clicar em atualizar.
+O arquivo **ESTOQUE SICRONIZADO** do Google Planilhas é atualizado automaticamente por um serviço do Supabase. Ele pode ser aberto pelo cartão **Google Planilhas — sincronização automática online** em **Configurações**.
 
 - O Supabase e o banco local continuam sendo a fonte oficial do estoque; a planilha oferece uma visualização simples e um campo de contagem mensal.
 - A primeira aba é sempre **ESTOQUE ATUAL**, protegida contra edição, com todos os produtos, seus saldos atuais e o total no final.
 - Depois dela, o aplicativo cria uma aba para cada mês, com o produto no formato `GRUPO/MODELO + PRODUTO + VARIAÇÃO`.
 - Cada aba possui as colunas **Produto**, **Estoque do sistema**, **Contagem**, **Diferença** e **Estoque final**, além do total do estoque final.
 - Somente a coluna **Contagem** fica liberada para digitação. Uma diferença negativa aparece em vermelho e uma positiva em verde.
-- Uma contagem digitada no Excel é trazida para o histórico do aplicativo e sincronizada com o Supabase; a correção posterior da mesma contagem atualiza o ajuste auditado.
-- Novos produtos e movimentações atualizam a planilha automaticamente em poucos instantes. A verificação a cada 5 segundos também traz contagens digitadas no Excel sem regravar o arquivo quando nada mudou.
-- O aplicativo precisa estar aberto e o cliente do OneDrive precisa estar em execução para que as alterações sejam enviadas e recebidas pelo Excel Online.
+- A coluna **Contagem** pertence somente ao Google Planilhas: não é preenchida pelo aplicativo e não altera o estoque no Supabase.
+- No mês atual, **Estoque do sistema** acompanha o mesmo saldo exibido em **ESTOQUE ATUAL**; novos produtos e movimentações aparecem automaticamente.
+- Não há arquivo local, pasta OneDrive nem cliente do OneDrive obrigatório. Qualquer computador conectado à internet pode visualizar a mesma planilha.
+- A planilha consulta o Supabase automaticamente a cada minuto, mesmo que este computador esteja desligado.
 
 ## Recursos
 

@@ -35,6 +35,24 @@ class CloudSyncError(RuntimeError):
     pass
 
 
+def _response_error_message(detail: object, *, explicit_only: bool = False) -> str | None:
+    """Extract a useful API error without assuming a single response shape."""
+    if not isinstance(detail, dict):
+        return None
+    keys = ("error",) if explicit_only else ("error", "msg", "message", "error_description")
+    for key in keys:
+        value = detail.get(key)
+        if isinstance(value, dict):
+            value = (
+                value.get("message")
+                or value.get("description")
+                or value.get("code")
+            )
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
 class CloudSync:
     def __init__(self, folder: Path, settings: dict):
         self.folder = folder
@@ -62,14 +80,17 @@ class CloudSync:
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 raw = response.read()
-                return json.loads(raw) if raw else None
+                try:
+                    return json.loads(raw) if raw else None
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise CloudSyncError("O Supabase retornou uma resposta inválida.") from error
         except urllib.error.HTTPError as error:
             if authenticated and error.code == 401 and retry and self.settings.get("cloud_refresh_token"):
                 self.refresh_session()
                 return self._request(path, method=method, body=body, authenticated=True, headers=headers, retry=False)
             try:
                 detail = json.loads(error.read().decode("utf-8"))
-                message = detail.get("msg") or detail.get("message") or detail.get("error_description")
+                message = _response_error_message(detail)
             except (ValueError, UnicodeDecodeError):
                 message = None
             raise CloudSyncError(message or f"O Supabase respondeu com erro {error.code}.") from error
