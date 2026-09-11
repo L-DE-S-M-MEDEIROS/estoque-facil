@@ -12,6 +12,7 @@ export type InventoryPayload = {
 export type SheetRow = {
   product_id: number;
   product: string;
+  group_name: string;
   system_stock: number;
   counted: number | null;
   difference: number | null;
@@ -121,7 +122,9 @@ function stockAsOf(movements: JsonRecord[], productId: number, endDate: string):
 }
 
 export function buildSheetSnapshot(payload: InventoryPayload, today: string) {
-  const products = rows(payload, "products").sort(compareProducts);
+  const products = rows(payload, "products")
+    .filter((product) => !(text(product.name).toLocaleLowerCase("pt-BR") === "teste" && !text(product.group_name)))
+    .sort(compareProducts);
   const movements = rows(payload, "movements");
   const currentMonth = today.slice(0, 7);
   const datedValues = [
@@ -146,6 +149,7 @@ export function buildSheetSnapshot(payload: InventoryPayload, today: string) {
       monthRows.push({
         product_id: productId,
         product: productName(product),
+        group_name: text(product.group_name).toLocaleUpperCase("pt-BR"),
         system_stock: systemStock,
         counted: null,
         difference: null,
@@ -164,6 +168,7 @@ export function buildSheetSnapshot(payload: InventoryPayload, today: string) {
   const current = months.find((item) => item.is_current)?.rows.map((item) => ({
     product_id: item.product_id,
     product: item.product,
+    group_name: item.group_name,
     stock: item.final_stock,
   })) ?? [];
   return { current, months };

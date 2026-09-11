@@ -11,7 +11,7 @@ import sqlite3
 import sys
 import threading
 import webbrowser
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -35,10 +35,18 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.11"
+APP_VERSION = "1.2.12"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1eXMlyvFpO_-MkD8oaux1NrlupqR-ECNyEZS1XSgJIiY/edit?usp=sharing"
 SEARCH_RESULT_LIMIT = 18
+
+
+def is_test_product(product) -> bool:
+    return bool(product) and str(product["name"] or "").strip().casefold() == "teste" and not str(product["group_name"] or "").strip()
+
+
+def product_stock_label(product) -> str:
+    return "∞ (sem controle)" if is_test_product(product) else fmt_number(product["stock"])
 
 
 def month_last_day(month: str) -> str:
@@ -565,7 +573,7 @@ def build_current_stock_print_pdf(output_path: Path, products, generated_at: dat
         table_data.append([
             Paragraph(xml_escape(group_name), cell_style),
             Paragraph(xml_escape(product_name), cell_style),
-            Paragraph(f"{fmt_number(product['stock'])} {xml_escape(str(product['unit']))}", centered_style),
+            Paragraph(f"{product_stock_label(product)} {xml_escape(str(product['unit']))}", centered_style),
             confirmation_box,
         ])
     table = Table(table_data, colWidths=[42*mm, 72*mm, 30*mm, 31*mm], repeatRows=1, hAlign="LEFT")
@@ -928,6 +936,9 @@ class Database:
         query = search.strip()
         return [row for row in rows if product_matches_search(row, query)] if query else list(rows)
 
+    def stock_products(self, search: str = "") -> list[sqlite3.Row]:
+        return [product for product in self.products(search) if not is_test_product(product)]
+
     def groups(self) -> list[str]:
         return [row["name"] for row in self.db.execute("SELECT name FROM product_groups WHERE active=1 ORDER BY name COLLATE NOCASE")]
 
@@ -1163,6 +1174,8 @@ class Database:
         }
         result: list[dict] = []
         for product in products:
+            if is_test_product(product):
+                continue
             count = counts.get(int(product["id"]))
             final_stock = float(product["final_stock"])
             counted = float(count["counted_quantity"]) if count else None
@@ -1282,6 +1295,7 @@ class Database:
             FROM products p LEFT JOIN movements m ON m.product_id=p.id
             GROUP BY p.id
             HAVING COALESCE(SUM(m.quantity),0) < -0.0000001
+                AND NOT (LOWER(TRIM(p.name))='teste' AND TRIM(COALESCE(p.group_name,''))='')
             ORDER BY p.name COLLATE NOCASE,p.group_name COLLATE NOCASE,p.variant COLLATE NOCASE""").fetchall()
 
     def _balance_before(self, product_id: int, movement_date: str, created_at: str, movement_id: int) -> float:
@@ -1332,7 +1346,13 @@ class Database:
             if product_id in unique_products:
                 raise ValueError("O mesmo produto não pode aparecer duas vezes no conjunto.")
             unique_products.add(product_id)
-        created_at = datetime.now().isoformat(timespec="microseconds")
+        created_time = datetime.now()
+        created_at = created_time.isoformat(timespec="microseconds")
+        # O relógio do Windows pode repetir o instante entre duas operações.
+        # Desempate antes de gravar para preservar a ordem ao editar contagens.
+        while self.db.execute("SELECT 1 FROM movement_batches WHERE created_at=?", (created_at,)).fetchone():
+            created_time += timedelta(microseconds=1)
+            created_at = created_time.isoformat(timespec="microseconds")
         with self.db:
             batch = self.db.execute("""INSERT INTO movement_batches(operation_id,movement_date,reason,performed_by,created_at)
                 VALUES(?,?,?,?,?)""", (definition["id"], movement_date, reason.strip(), responsible, created_at))
@@ -1992,7 +2012,7 @@ class ProductManagerDialog(BrandedToplevel):
         card=Card(content);card.grid(row=1,column=0,sticky="nsew");self.tree=parent.table(card,("name","group","variant","category","stock"),("Produto","Grupo / modelo","Variação","Categoria","Saldo"),(220,190,170,150,90));self.tree.pack(fill="both",expand=True,padx=18,pady=18);self.tree.bind("<Double-1>",lambda _event:self.edit_product());self.refresh()
     def refresh(self):
         self.tree.delete(*self.tree.get_children())
-        for product in self.parent.db.products(self.search.get()):self.tree.insert("","end",iid=str(product["id"]),values=(product["name"],product["group_name"]or"—",product["variant"]or"—",product["category"]or"—",fmt_number(product["stock"])))
+        for product in self.parent.db.products(self.search.get()):self.tree.insert("","end",iid=str(product["id"]),values=(product["name"],product["group_name"]or"—",product["variant"]or"—",product["category"]or"—",product_stock_label(product)))
     def selected_product(self):
         selected=self.tree.selection();return int(selected[0]) if selected else None
     def _open_editor(self,product=None):
@@ -2067,7 +2087,7 @@ class SkuMappingEditorDialog(BrandedToplevel):
         for product in self.products_cache:
             if query and not product_matches_search(product,query):continue
             product_id=int(product["id"]);selected=product_id in self.selected_product_ids;visible+=1
-            self.product_tree.insert("","end",iid=str(product_id),values=("✓" if selected else "",product_label(product),f"{fmt_number(product['stock'])} {product['unit']}"),tags=("sku_selected",) if selected else ())
+            self.product_tree.insert("","end",iid=str(product_id),values=("✓" if selected else "",product_label(product),f"{product_stock_label(product)} {product['unit']}"),tags=("sku_selected",) if selected else ())
         self.update_selection_status(visible)
 
     def schedule_product_refresh(self,_event=None):
@@ -2082,7 +2102,7 @@ class SkuMappingEditorDialog(BrandedToplevel):
         if product_id in self.selected_product_ids:self.selected_product_ids.remove(product_id)
         else:self.selected_product_ids.add(product_id)
         product=self.products_by_id[product_id];selected=product_id in self.selected_product_ids
-        self.product_tree.item(item_id,values=("✓" if selected else "",product_label(product),f"{fmt_number(product['stock'])} {product['unit']}"),tags=("sku_selected",) if selected else ())
+        self.product_tree.item(item_id,values=("✓" if selected else "",product_label(product),f"{product_stock_label(product)} {product['unit']}"),tags=("sku_selected",) if selected else ())
         self.update_selection_status(len(self.product_tree.get_children()))
         return "break"
 
@@ -2682,7 +2702,7 @@ class EstoqueApp(ctk.CTk):
     def refresh_products(self):
         if not hasattr(self,"product_tree"):return
         self.product_tree.delete(*self.product_tree.get_children()); search=self.product_search.get() if hasattr(self,"product_search") else ""
-        for p in self.db.products(search):self.product_tree.insert("","end",iid=str(p["id"]),values=(p["name"],p["group_name"]or"—",p["variant"]or"—",p["category"]or"—",p["unit"],fmt_number(p["minimum"]),fmt_number(p["stock"])))
+        for p in self.db.products(search):self.product_tree.insert("","end",iid=str(p["id"]),values=(p["name"],p["group_name"]or"—",p["variant"]or"—",p["category"]or"—",p["unit"],fmt_number(p["minimum"]),product_stock_label(p)))
 
     def selected_product(self):
         selected=self.product_tree.selection();return int(selected[0]) if selected else None
@@ -2729,11 +2749,11 @@ class EstoqueApp(ctk.CTk):
         if not hasattr(self,"stock_tree"):return
         negative_products=self.db.negative_stock_products()
         if negative_products:
-            negative_details="  •  ".join(f"{product_label(product)}: {fmt_number(product['stock'])} {product['unit']}" for product in negative_products)
+            negative_details="  •  ".join(f"{product_label(product)}: {product_stock_label(product)} {product['unit']}" for product in negative_products)
             self.negative_stock_alert_text.configure(text=f"{negative_details}\nVerifique as movimentações e registre uma entrada ou um ajuste positivo para corrigir o saldo.")
             if not self.negative_stock_alert.winfo_manager():self.negative_stock_alert.pack(fill="x",pady=(0,16),before=self.stock_cards_container)
         elif self.negative_stock_alert.winfo_manager():self.negative_stock_alert.pack_forget()
-        items=self.db.products(self.stock_search.get() if hasattr(self,"stock_search") else "");confidence=self.db.stock_confidences(items);self.stock_tree.delete(*self.stock_tree.get_children());units=low=low_confidence=0;scores={};quantities={};current_group=None;group_index=0
+        items=self.db.stock_products(self.stock_search.get() if hasattr(self,"stock_search") else "");confidence=self.db.stock_confidences(items);self.stock_tree.delete(*self.stock_tree.get_children());units=low=low_confidence=0;scores={};quantities={};current_group=None;group_index=0
         for p in items:
             group=(p["group_name"]or"").strip()or"Sem grupo";group_key=group.casefold()
             if group_key!=current_group:group_index+=1;current_group=group_key;self.stock_tree.insert("","end",iid=f"group:{group_index}",values=(f"—  {group.upper()}  —","","",""),tags=("group_header",))
@@ -2835,7 +2855,7 @@ class EstoqueApp(ctk.CTk):
         self.cancel_ui_task("simulation_product_search")
         product=self.db.product(int(product_id))
         if not product:return
-        self.sim_selected_product_id=int(product_id);self.sim_product.set(self.movement_product_display(product));self.sim_selected_stock.configure(text=f"Estoque atual: {fmt_number(product['stock'])} {product['unit']}",text_color=COLORS["accent"]);self.refresh_simulation_product_results()
+        self.sim_selected_product_id=int(product_id);self.sim_product.set(self.movement_product_display(product));self.sim_selected_stock.configure(text=f"Estoque atual: {product_stock_label(product)} {product['unit']}",text_color=COLORS["accent"]);self.refresh_simulation_product_results()
     def add_simulation_item(self):
         product_id=self.sim_selected_product_id
         if not product_id:
@@ -2872,7 +2892,7 @@ class EstoqueApp(ctk.CTk):
         try:build_simulation_print_pdf(output,rows,self.simulation_operation_key());os.startfile(str(output))
         except (OSError,ValueError) as error:messagebox.showerror(APP_NAME,f"Não foi possível abrir a lista para impressão.\n\n{error}\n\nArquivo: {output}",parent=self)
     def print_current_stock(self):
-        products=self.db.products()
+        products=self.db.stock_products()
         if not products:messagebox.showinfo(APP_NAME,"Cadastre produtos antes de imprimir o estoque atual.",parent=self);return
         output=data_dir()/"impressoes"/f"estoque-atual-conferencia-{datetime.now().strftime('%Y%m%d-%H%M%S')}.pdf"
         try:build_current_stock_print_pdf(output,products);os.startfile(str(output))
@@ -3016,7 +3036,7 @@ class EstoqueApp(ctk.CTk):
             ctk.CTkLabel(self.quick_product_suggestions,text="Nenhum produto encontrado",height=38,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(fill="x",padx=10,pady=4)
         else:
             for product in results[:SEARCH_RESULT_LIMIT]:
-                label=f"{self.movement_product_display(product)}  •  Saldo: {fmt_number(product['stock'])} {product['unit']}"
+                label=f"{self.movement_product_display(product)}  •  Saldo: {product_stock_label(product)} {product['unit']}"
                 ctk.CTkButton(self.quick_product_suggestions,text=label,anchor="w",height=36,corner_radius=6,fg_color="transparent",hover_color=COLORS["accent_soft"],text_color=COLORS["text"],command=lambda product_id=int(product["id"]):self.select_quick_product(product_id)).pack(fill="x",padx=5,pady=2)
             if len(results)>SEARCH_RESULT_LIMIT:ctk.CTkLabel(self.quick_product_suggestions,text=f"Mostrando {SEARCH_RESULT_LIMIT} de {len(results)}. Continue digitando para filtrar.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",9)).pack(pady=5)
         self.quick_product_suggestions.pack(fill="x",pady=(0,10),before=self.quick_current.master)
@@ -3042,7 +3062,7 @@ class EstoqueApp(ctk.CTk):
     def update_quick_current(self):
         if not hasattr(self, "quick_current"):return
         product=self.db.product(self.quick_selected_product_id) if self.quick_selected_product_id else None
-        self.quick_current.configure(text=f"Saldo atual: {fmt_number(product['stock'])} {product['unit']}" if product else "Saldo atual: —")
+        self.quick_current.configure(text=f"Saldo atual: {product_stock_label(product)} {product['unit']}" if product else "Saldo atual: —")
 
     def on_quick_action_change(self, _value=None):
         if not hasattr(self, "quick_register_button"):return
@@ -3119,7 +3139,7 @@ class EstoqueApp(ctk.CTk):
         return page
 
     def count_product_results(self,query=""):
-        return self.db.products(query)
+        return self.db.stock_products(query)
 
     def hide_count_product_suggestions(self):
         if hasattr(self,"count_product_suggestions"):
@@ -3170,7 +3190,7 @@ class EstoqueApp(ctk.CTk):
         pid=self.c_selected_product_id if hasattr(self,"c_selected_product_id") else None
         if not hasattr(self,"count_current"):return
         product=self.db.product(pid) if pid else None
-        self.count_current.configure(text=f"Saldo do sistema: {fmt_number(product['stock'])} {product['unit']}" if product else "Saldo do sistema: —")
+        self.count_current.configure(text=f"Saldo do sistema: {product_stock_label(product)} {product['unit']}" if product else "Saldo do sistema: —")
 
     def selected_count_product(self):
         selected=self.count_tree.selection() if hasattr(self,"count_tree") else ();return int(selected[0]) if selected else None
@@ -3222,7 +3242,7 @@ class EstoqueApp(ctk.CTk):
         if not hasattr(self,"count_tree"):return
         selected_product=self.db.product(self.c_selected_product_id) if getattr(self,"c_selected_product_id",None) else None
         if not selected_product:self.c_selected_product_id=None;self.c_product.set("");self.update_count_current()
-        search=self.count_search.get() if hasattr(self,"count_search") else "";items=self.db.products(search);self.count_tree.delete(*self.count_tree.get_children());all_items=self.db.products();pending=counted_today=differences_today=total_score=0;today=date.today().isoformat();infos=self.db.stock_confidences(all_items);visible_scores={};visible_ages={}
+        search=self.count_search.get() if hasattr(self,"count_search") else "";items=self.db.stock_products(search);self.count_tree.delete(*self.count_tree.get_children());all_items=self.db.stock_products();pending=counted_today=differences_today=total_score=0;today=date.today().isoformat();infos=self.db.stock_confidences(all_items);visible_scores={};visible_ages={}
         for p in all_items:
             trust=infos[int(p["id"])];pending+=trust["checkin"]=="PENDENTE";counted_today+=trust["last_date"]==today;differences_today+=trust["last_date"]==today and trust["last_difference"] is not None and abs(trust["last_difference"])>.0000001;total_score+=trust["score"]
         selected_filter=self.count_filter.get() if hasattr(self,"count_filter") else "todos"
@@ -3372,7 +3392,7 @@ class EstoqueApp(ctk.CTk):
             return
         for product in products[:SEARCH_RESULT_LIMIT]:
             selected = int(product["id"]) == self.kit_primary_product_id
-            label = f"{product_label(product)}    •    Saldo: {fmt_number(product['stock'])} {product['unit']}"
+            label = f"{product_label(product)}    •    Saldo: {product_stock_label(product)} {product['unit']}"
             ctk.CTkButton(
                 self.kit_primary_suggestions, text=label, anchor="w", height=38,
                 corner_radius=7, fg_color=COLORS["nav_selected"] if selected else "transparent",
@@ -3402,7 +3422,7 @@ class EstoqueApp(ctk.CTk):
         primary = self.db.product(self.kit_primary_product_id) if self.kit_primary_product_id else None
         matches = compatible_smaller_kits(primary, self.db.products()) if primary else []
         self.kit_secondary_mapping = {
-            f"{product_label(product)}  •  Saldo: {fmt_number(product['stock'])} {product['unit']}": int(product["id"])
+            f"{product_label(product)}  •  Saldo: {product_stock_label(product)} {product['unit']}": int(product["id"])
             for product in matches
         }
         values = list(self.kit_secondary_mapping)
@@ -3798,7 +3818,7 @@ class EstoqueApp(ctk.CTk):
         self.m_quantity_entry.configure(placeholder_text="Nova contagem" if operation and operation["effect"]=="set" else "Quantidade")
         self.save_interface_state()
     def update_current_stock(self):
-        pid=self.m_selected_product_id;self.current_stock.configure(text=f"Saldo atual: {fmt_number(self.db.stock(pid))}" if pid else "Saldo atual: —")
+        pid=self.m_selected_product_id;self.current_stock.configure(text=f"Saldo atual: {product_stock_label(self.db.product(pid))}" if pid else "Saldo atual: —")
     def add_draft_item(self):
         pid=self.m_selected_product_id
         if not pid:
@@ -3876,7 +3896,7 @@ class EstoqueApp(ctk.CTk):
     def show_movement_result(self, success_message: str):
         negative_products=self.db.negative_stock_products()
         if not negative_products:messagebox.showinfo(APP_NAME,success_message,parent=self);return
-        details="\n".join(f"• {product_label(product)}: {fmt_number(product['stock'])} {product['unit']}" for product in negative_products)
+        details="\n".join(f"• {product_label(product)}: {product_stock_label(product)} {product['unit']}" for product in negative_products)
         messagebox.showwarning(APP_NAME,f"{success_message}\n\nATENÇÃO: ESTOQUE NEGATIVO\n{details}\n\nA alteração foi concluída sem bloquear o saldo negativo. Verifique o ocorrido e registre uma entrada ou um ajuste positivo para corrigir o saldo.",parent=self)
     def selected_history_entry(self):
         selected=self.history_tree.selection();return selected[0] if selected else None
