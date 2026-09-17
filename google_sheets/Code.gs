@@ -83,10 +83,10 @@ function enviarContagem(event) {
 
 function buscarSnapshotFirebase_() {
   const url = ESTOQUE_CONFIG.firebaseDatabaseUrl + '/workspaces/'
-    + encodeURIComponent(ESTOQUE_CONFIG.firebaseWorkspace) + '.json';
+    + encodeURIComponent(ESTOQUE_CONFIG.firebaseWorkspace) + '.json?access_token='
+    + encodeURIComponent(ScriptApp.getOAuthToken());
   const response = fetchComRetry_(url, {
     method: 'get',
-    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
     muteHttpExceptions: true,
   });
   let parsed;
@@ -96,7 +96,9 @@ function buscarSnapshotFirebase_() {
     throw new Error('O Firebase respondeu em formato inválido.');
   }
   if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) {
-    throw new Error((parsed && parsed.error) || 'Não foi possível consultar o Firebase.');
+    const detail = parsed && parsed.error ? String(parsed.error) : 'resposta não autorizada';
+    throw new Error('Não foi possível consultar o Firebase (' + response.getResponseCode() + '): ' + detail
+      + '. Execute configurarAutomacao novamente com a conta proprietária da planilha.');
   }
   if (!parsed || !parsed.payload || parsed.payload.format !== 1) {
     throw new Error('O estoque online ainda não possui uma cópia válida.');

@@ -5,6 +5,7 @@ import binascii
 import hashlib
 import json
 import sqlite3
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +32,7 @@ TABLES = (
     "monthly_stock_counts",
 )
 SHARED_WORKSPACE_KEY = "bolsas-baby"
+TOKEN_REFRESH_SKEW_SECONDS = 90
 
 
 class CloudSyncError(RuntimeError):
@@ -81,28 +83,101 @@ class CloudSync:
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise CloudSyncError("O Firebase retornou uma resposta inválida.") from error
 
+    @staticmethod
+    def _token_expiry(token: str) -> int | None:
+        """Read only the JWT expiry claim; signature validation stays in Firebase."""
+        try:
+            parts = token.split(".")
+            if len(parts) != 3:
+                return None
+            encoded = parts[1].replace("-", "+").replace("_", "/")
+            encoded += "=" * (-len(encoded) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(encoded).decode("utf-8"))
+            expiry = int(payload.get("exp"))
+            return expiry if expiry > 0 else None
+        except (ValueError, TypeError, KeyError, UnicodeDecodeError, binascii.Error, json.JSONDecodeError):
+            return None
+
+    def _token_needs_refresh(self) -> bool:
+        token = str(self.settings.get("cloud_access_token") or "")
+        expiry = self._token_expiry(token)
+        return expiry is not None and expiry <= int(time.time()) + TOKEN_REFRESH_SKEW_SECONDS
+
+    def _refresh_or_reauthenticate(self) -> None:
+        try:
+            self.refresh_session()
+        except CloudSyncError as error:
+            # Do not keep a dead session that causes an error on every timer tick.
+            self.sign_out()
+            raise CloudSyncError(
+                "A sessão do Firebase expirou. Entre novamente em Configurações → Conta."
+            ) from error
+
     def _request(self, path: str, *, method="GET", body=None, authenticated=False, headers=None, retry=True):
         request_headers = {"Content-Type": "application/json"}
+        request_url = FIREBASE_DATABASE_URL + path
         if authenticated:
             if not self.signed_in:
                 raise CloudSyncError("Entre na sua conta para sincronizar.")
-            request_headers["Authorization"] = f"Bearer {self.settings['cloud_access_token']}"
+            # Firebase ID tokens must be sent in the Realtime Database REST
+            # `auth` query parameter.  The Authorization: Bearer header is
+            # reserved for Google OAuth2 access tokens and makes Firebase
+            # answer "Unauthorized request." when used with an ID token.
+            separator = "&" if "?" in request_url else "?"
+            request_url = (
+                f"{request_url}{separator}auth="
+                f"{urllib.parse.quote(self.settings['cloud_access_token'], safe='')}"
+            )
+            if self._token_needs_refresh() and self.settings.get("cloud_refresh_token"):
+                self._refresh_or_reauthenticate()
+                request_url = FIREBASE_DATABASE_URL + path
+                separator = "&" if "?" in request_url else "?"
+                request_url = (
+                    f"{request_url}{separator}auth="
+                    f"{urllib.parse.quote(self.settings['cloud_access_token'], safe='')}"
+                )
         if headers:
             request_headers.update(headers)
         data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
-        request = urllib.request.Request(FIREBASE_DATABASE_URL + path, data=data, method=method, headers=request_headers)
+        request = urllib.request.Request(request_url, data=data, method=method, headers=request_headers)
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 return self._read_response(response)
         except urllib.error.HTTPError as error:
-            if authenticated and error.code == 401 and retry and self.settings.get("cloud_refresh_token"):
-                self.refresh_session()
-                return self._request(path, method=method, body=body, authenticated=True, headers=headers, retry=False)
+            if error.code in (408, 425, 429, 500, 502, 503, 504) and retry:
+                time.sleep(0.75)
+                return self._request(path, method=method, body=body, authenticated=authenticated, headers=headers, retry=False)
             try:
                 detail = json.loads(error.read().decode("utf-8"))
                 message = _response_error_message(detail)
             except (ValueError, UnicodeDecodeError):
                 message = None
+            normalized_message = (message or "").casefold().strip().rstrip(".")
+            token_rejected = error.code == 401 and normalized_message in {
+                "unauthorized request",
+                "invalid token",
+                "invalid id token",
+                "auth token is expired",
+                "auth token is invalid",
+            }
+            if authenticated and error.code == 401 and retry and self.settings.get("cloud_refresh_token"):
+                # Refresh only an expired/invalid Firebase ID token. A
+                # "Permission denied" response means the account reached the
+                # database but is not allowed by its rules; retrying with a
+                # fresh token would only hide that configuration problem.
+                if token_rejected or not message:
+                    self._refresh_or_reauthenticate()
+                    return self._request(path, method=method, body=body, authenticated=True, headers=headers, retry=False)
+            if authenticated and token_rejected:
+                self.sign_out()
+                raise CloudSyncError(
+                    "A sessão do Firebase expirou. Entre novamente em Configurações → Conta."
+                ) from error
+            if error.code == 401:
+                message = message or (
+                    "O Firebase recusou esta conta. Verifique se ela está autorizada nas regras "
+                    "do Realtime Database."
+                )
             raise CloudSyncError(message or f"O Firebase respondeu com erro {error.code}.") from error
         except (urllib.error.URLError, TimeoutError) as error:
             raise CloudSyncError("Não foi possível conectar ao Firebase. Verifique a internet.") from error

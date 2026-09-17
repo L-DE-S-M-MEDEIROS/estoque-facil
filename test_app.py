@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import io
 import os
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 import app
@@ -1049,6 +1051,82 @@ class SharedCloudSyncTests(unittest.TestCase):
         self.assertTrue(request.call_args.kwargs["authenticated"])
         self.assertEqual(body["updated_by"], self.settings["cloud_user_id"])
         self.assertNotIn("owner_id", body)
+
+    def test_firebase_id_tokens_use_auth_query_parameter(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def read():
+                return b"null"
+
+        with patch("cloud_sync.urllib.request.urlopen", return_value=Response()) as urlopen:
+            self.assertIsNone(self.sync.remote_snapshot())
+
+        request = urlopen.call_args.args[0]
+        self.assertIn("auth=token", request.full_url)
+        self.assertNotIn("Authorization", request.headers)
+
+    def test_expired_firebase_id_token_is_refreshed_before_request(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def read():
+                return b"null"
+
+        self.settings["cloud_refresh_token"] = "refresh"
+        expired = "eyJhbGciOiJub25lIn0.eyJleHAiOjF9.signature"
+        self.settings["cloud_access_token"] = expired
+        refreshed = "eyJhbGciOiJub25lIn0.eyJleHAiOjQxMDAwMDAwMDB9.signature"
+        with patch.object(self.sync, "refresh_session", side_effect=lambda: self.settings.update({"cloud_access_token": refreshed})), patch("cloud_sync.urllib.request.urlopen", return_value=Response()) as urlopen:
+            self.assertIsNone(self.sync.remote_snapshot())
+        self.assertIn("auth=eyJhbGciOiJub25lIn0.eyJleHAiOjQxMDAwMDAwMDB9.signature", urlopen.call_args.args[0].full_url)
+
+    def test_invalid_refresh_token_clears_session_instead_of_repeating_error(self):
+        database_url = "https://estoque-bolsas-baby-default-rtdb.firebaseio.com/workspaces/bolsas-baby.json?auth=token"
+        database_error = urllib.error.HTTPError(
+            database_url,
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(b'{"error":"Unauthorized request."}'),
+        )
+        token_error = urllib.error.HTTPError(
+            "https://securetoken.googleapis.com/v1/token",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'{"error":{"message":"INVALID_REFRESH_TOKEN"}}'),
+        )
+        self.settings["cloud_refresh_token"] = "expired-refresh"
+        with patch("cloud_sync.urllib.request.urlopen", side_effect=[database_error, token_error]):
+            with self.assertRaisesRegex(CloudSyncError, "sessão do Firebase expirou"):
+                self.sync.remote_snapshot()
+        self.assertFalse(self.sync.signed_in)
+        self.assertNotIn("cloud_access_token", self.settings)
+
+    def test_permission_denied_does_not_sign_out_valid_session(self):
+        error = urllib.error.HTTPError(
+            "https://estoque-bolsas-baby-default-rtdb.firebaseio.com/workspaces/bolsas-baby.json?auth=token",
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(b'{"error":"Permission denied"}'),
+        )
+        self.settings["cloud_refresh_token"] = "valid-refresh"
+        with patch("cloud_sync.urllib.request.urlopen", side_effect=[error]):
+            with self.assertRaisesRegex(CloudSyncError, "Permission denied"):
+                self.sync.remote_snapshot()
+        self.assertTrue(self.sync.signed_in)
 
     def test_remote_change_is_downloaded_when_local_matches_last_sync(self):
         local = self.payload("MARINHO")
