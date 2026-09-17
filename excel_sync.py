@@ -6,9 +6,10 @@ import json
 import math
 import os
 import re
-import shutil
 import tempfile
+import zipfile
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -140,11 +141,18 @@ class MonthlyStockWorkbook:
             return load_workbook(self.path, data_only=False)
         except PermissionError as error:
             raise ExcelSyncError("A planilha está ocupada. Feche o Excel e tente novamente.") from error
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
             raise ExcelSyncError("Não foi possível abrir a planilha sincronizada.") from error
 
     def read_counts(self) -> list[WorkbookCount]:
         workbook = self._load()
+        try:
+            return self._read_counts_from_workbook(workbook)
+        finally:
+            workbook.close()
+
+    @staticmethod
+    def _read_counts_from_workbook(workbook) -> list[WorkbookCount]:
         counts: list[WorkbookCount] = []
         for sheet in workbook.worksheets:
             month = month_from_title(sheet.title)
@@ -159,20 +167,87 @@ class MonthlyStockWorkbook:
                     counts.append(WorkbookCount(month, int(product_id), quantity))
                 except (TypeError, ValueError):
                     continue
-        workbook.close()
         return counts
 
-    def write(self, months: list[dict]) -> dict:
-        workbook = self._load() if self.path.is_file() else Workbook()
+    @staticmethod
+    def _numbers_match(actual: object, expected: object) -> bool:
+        if actual in (None, "") and expected in (None, ""):
+            return True
+        try:
+            return math.isclose(float(actual), float(expected), rel_tol=0, abs_tol=0.0000001)
+        except (TypeError, ValueError):
+            return False
+
+    def matches(self, months: list[dict]) -> bool:
+        """Confere o conteúdo real antes de considerar a planilha atualizada."""
+        workbook = self._load()
+        try:
+            return self._matches_workbook(workbook, months)
+        finally:
+            workbook.close()
+
+    @classmethod
+    def _matches_workbook(cls, workbook, months: list[dict]) -> bool:
+        expected_titles = [
+            CURRENT_SHEET_TITLE,
+            *(month_title(str(item["month"])) for item in months),
+        ]
+        if workbook.sheetnames[:len(expected_titles)] != expected_titles:
+            return False
+
+        current_month = next((item for item in months if item.get("is_current")), None)
+        current_rows = list((current_month or {}).get("rows") or [])
+        current_sheet = workbook[CURRENT_SHEET_TITLE]
+        if current_sheet.max_row != len(current_rows) + 2:
+            return False
+        for index, item in enumerate(current_rows, start=2):
+            final_stock = item.get("final_stock")
+            if final_stock is None:
+                counted = item.get("counted")
+                final_stock = (
+                    item.get("system_stock")
+                    if counted is None
+                    else float(counted) + float(item.get("post_count_delta") or 0)
+                )
+            if current_sheet.cell(index, 1).value != str(item["product"]):
+                return False
+            if not cls._numbers_match(current_sheet.cell(index, 2).value, final_stock or 0):
+                return False
+
+        for month_data in months:
+            key = str(month_data["month"])
+            sheet = workbook[month_title(key)]
+            rows = list(month_data.get("rows") or [])
+            if sheet.max_row != len(rows) + 2:
+                return False
+            for index, item in enumerate(rows, start=2):
+                if sheet.cell(index, 1).value != str(item["product"]):
+                    return False
+                if not cls._numbers_match(sheet.cell(index, 2).value, item["system_stock"]):
+                    return False
+                if not cls._numbers_match(sheet.cell(index, 3).value, item.get("counted")):
+                    return False
+                if not cls._numbers_match(sheet.cell(index, 6).value, item["product_id"]):
+                    return False
+                if not cls._numbers_match(
+                    sheet.cell(index, 7).value, item.get("post_count_delta") or 0
+                ):
+                    return False
+                if sheet.cell(index, 8).value != key:
+                    return False
+        return True
+
+    @classmethod
+    def _populate_workbook(cls, workbook, months: list[dict]) -> list[str]:
         current_month = next((item for item in months if item.get("is_current")), None)
         current_rows = list((current_month or {}).get("rows") or [])
         if CURRENT_SHEET_TITLE in workbook.sheetnames:
             current_sheet = workbook[CURRENT_SHEET_TITLE]
-            self._reset_sheet(current_sheet)
+            cls._reset_sheet(current_sheet)
         else:
             current_sheet = workbook.create_sheet(CURRENT_SHEET_TITLE, 0)
-        self._move_sheet(workbook, current_sheet, 0)
-        self._write_current(current_sheet, current_rows)
+        cls._move_sheet(workbook, current_sheet, 0)
+        cls._write_current(current_sheet, current_rows)
 
         written: list[str] = [CURRENT_SHEET_TITLE]
         for position, month_data in enumerate(months, start=1):
@@ -183,9 +258,9 @@ class MonthlyStockWorkbook:
                 sheet = workbook.create_sheet(title, position)
             else:
                 sheet = existing
-                self._reset_sheet(sheet)
-            self._move_sheet(workbook, sheet, position)
-            self._write_month(sheet, month_data)
+                cls._reset_sheet(sheet)
+            cls._move_sheet(workbook, sheet, position)
+            cls._write_month(sheet, month_data)
             written.append(title)
 
         for placeholder_title in ("Planilha1", "Sheet"):
@@ -206,24 +281,31 @@ class MonthlyStockWorkbook:
             workbook.calculation = CalcProperties()
         workbook.calculation.fullCalcOnLoad = True
         workbook.calculation.forceFullCalc = True
+        return written
+
+    def write(self, months: list[dict]) -> dict:
+        source_bytes: bytes | None = None
+        if self.path.is_file():
+            try:
+                source_bytes = self.path.read_bytes()
+            except PermissionError as error:
+                raise ExcelSyncError("A planilha está ocupada. Feche o Excel e tente novamente.") from error
+            except OSError as error:
+                raise ExcelSyncError("Não foi possível abrir a planilha sincronizada.") from error
+        content = render_bytes(months, source_bytes)
         temporary_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
                 prefix=f".{self.path.stem}-", suffix=".xlsx", dir=self.path.parent, delete=False
             ) as temporary:
                 temporary_path = Path(temporary.name)
-            workbook.save(temporary_path)
-            workbook.close()
-            if self.path.exists():
-                # Mantém a identidade do arquivo para o cliente do OneDrive
-                # reconhecer a alteração imediatamente, sem criar um novo item.
-                with temporary_path.open("rb") as source, self.path.open("r+b") as destination:
-                    shutil.copyfileobj(source, destination)
-                    destination.truncate()
-                    destination.flush()
-                    os.fsync(destination.fileno())
-            else:
-                os.replace(temporary_path, self.path)
+                temporary.write(content)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            # A troca atômica gera o evento de arquivo que o cliente do OneDrive
+            # usa para enfileirar o upload. Regravar os bytes no mesmo identificador
+            # NTFS pode deixar o Excel Online parado em uma versão antiga.
+            os.replace(temporary_path, self.path)
         except PermissionError as error:
             raise ExcelSyncError("A planilha está ocupada. Feche o Excel e tente novamente.") from error
         except OSError as error:
@@ -231,7 +313,13 @@ class MonthlyStockWorkbook:
         finally:
             if temporary_path and temporary_path.exists():
                 temporary_path.unlink(missing_ok=True)
-        return {"path": str(self.path), "sheets": written}
+        return {
+            "path": str(self.path),
+            "sheets": [
+                CURRENT_SHEET_TITLE,
+                *(month_title(str(item["month"])) for item in months),
+            ],
+        }
 
     @staticmethod
     def _reset_sheet(sheet) -> None:
@@ -325,7 +413,6 @@ class MonthlyStockWorkbook:
         sheet.protection.sort = False
         sheet.protection.selectLockedCells = True
         sheet.protection.selectUnlockedCells = False
-
     @staticmethod
     def _write_month(sheet, month_data: dict) -> None:
         rows = list(month_data.get("rows") or [])
@@ -442,3 +529,40 @@ class MonthlyStockWorkbook:
         sheet.protection.sort = False
         sheet.protection.selectLockedCells = True
         sheet.protection.selectUnlockedCells = False
+
+
+def _load_workbook_bytes(content: bytes) -> Workbook:
+    try:
+        return load_workbook(BytesIO(bytes(content)), data_only=False)
+    except (TypeError, OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
+        raise ExcelSyncError("Não foi possível abrir a planilha sincronizada.") from error
+
+
+def read_counts_bytes(content: bytes) -> list[WorkbookCount]:
+    """Lê as contagens de um XLSX sem depender de um caminho local."""
+    workbook = _load_workbook_bytes(content)
+    try:
+        return MonthlyStockWorkbook._read_counts_from_workbook(workbook)
+    finally:
+        workbook.close()
+
+
+def matches_bytes(content: bytes, months: list[dict]) -> bool:
+    """Compara um XLSX em memória com a projeção atual do estoque."""
+    workbook = _load_workbook_bytes(content)
+    try:
+        return MonthlyStockWorkbook._matches_workbook(workbook, months)
+    finally:
+        workbook.close()
+
+
+def render_bytes(months: list[dict], source_bytes: bytes | None = None) -> bytes:
+    """Gera o XLSX completo em memória, preservando abas não gerenciadas da origem."""
+    workbook = _load_workbook_bytes(source_bytes) if source_bytes is not None else Workbook()
+    try:
+        MonthlyStockWorkbook._populate_workbook(workbook, months)
+        output = BytesIO()
+        workbook.save(output)
+        return output.getvalue()
+    finally:
+        workbook.close()

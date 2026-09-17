@@ -15,8 +15,10 @@ from pathlib import Path
 from database_utils import database_integrity_errors, register_database_functions
 
 
-SUPABASE_URL = "https://raleparpityoscsykssk.supabase.co"
-SUPABASE_KEY = "sb_publishable_YLaG2l4ORj5JuJmEsM26Vg_gC27RG_3"
+FIREBASE_API_KEY = "AIzaSyBzAJgXOVYuduVdd3DNdlURAtNK-ZPAP_E"
+FIREBASE_DATABASE_URL = "https://estoque-bolsas-baby-default-rtdb.firebaseio.com"
+FIREBASE_IDENTITY_URL = "https://identitytoolkit.googleapis.com/v1"
+FIREBASE_TOKEN_URL = "https://securetoken.googleapis.com/v1/token"
 TABLES = (
     "operation_types",
     "users",
@@ -61,14 +63,26 @@ class CloudSync:
 
     @property
     def signed_in(self) -> bool:
-        return bool(self.settings.get("cloud_access_token") and self.settings.get("cloud_user_id"))
+        return bool(
+            self.settings.get("cloud_provider") == "firebase"
+            and self.settings.get("cloud_access_token")
+            and self.settings.get("cloud_user_id")
+        )
 
     @property
     def email(self) -> str:
         return str(self.settings.get("cloud_email", ""))
 
+    @staticmethod
+    def _read_response(response):
+        raw = response.read()
+        try:
+            return json.loads(raw) if raw else None
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise CloudSyncError("O Firebase retornou uma resposta inválida.") from error
+
     def _request(self, path: str, *, method="GET", body=None, authenticated=False, headers=None, retry=True):
-        request_headers = {"apikey": SUPABASE_KEY, "Content-Type": "application/json"}
+        request_headers = {"Content-Type": "application/json"}
         if authenticated:
             if not self.signed_in:
                 raise CloudSyncError("Entre na sua conta para sincronizar.")
@@ -76,14 +90,10 @@ class CloudSync:
         if headers:
             request_headers.update(headers)
         data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
-        request = urllib.request.Request(SUPABASE_URL + path, data=data, method=method, headers=request_headers)
+        request = urllib.request.Request(FIREBASE_DATABASE_URL + path, data=data, method=method, headers=request_headers)
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
-                raw = response.read()
-                try:
-                    return json.loads(raw) if raw else None
-                except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                    raise CloudSyncError("O Supabase retornou uma resposta inválida.") from error
+                return self._read_response(response)
         except urllib.error.HTTPError as error:
             if authenticated and error.code == 401 and retry and self.settings.get("cloud_refresh_token"):
                 self.refresh_session()
@@ -93,43 +103,81 @@ class CloudSync:
                 message = _response_error_message(detail)
             except (ValueError, UnicodeDecodeError):
                 message = None
-            raise CloudSyncError(message or f"O Supabase respondeu com erro {error.code}.") from error
+            raise CloudSyncError(message or f"O Firebase respondeu com erro {error.code}.") from error
         except (urllib.error.URLError, TimeoutError) as error:
-            raise CloudSyncError("Não foi possível conectar ao Supabase. Verifique a internet.") from error
+            raise CloudSyncError("Não foi possível conectar ao Firebase. Verifique a internet.") from error
+
+    def _auth_request(self, endpoint: str, body: dict, *, form=False) -> dict:
+        headers = {"Content-Type": "application/x-www-form-urlencoded" if form else "application/json"}
+        data = (
+            urllib.parse.urlencode(body).encode("utf-8")
+            if form
+            else json.dumps(body, ensure_ascii=False).encode("utf-8")
+        )
+        request = urllib.request.Request(endpoint, data=data, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                result = self._read_response(response)
+                return result if isinstance(result, dict) else {}
+        except urllib.error.HTTPError as error:
+            try:
+                detail = json.loads(error.read().decode("utf-8"))
+                nested = detail.get("error") if isinstance(detail, dict) else None
+                code = nested.get("message") if isinstance(nested, dict) else None
+            except (ValueError, UnicodeDecodeError):
+                code = None
+            messages = {
+                "EMAIL_EXISTS": "Este e-mail já possui uma conta. Use o botão Entrar.",
+                "EMAIL_NOT_FOUND": "Conta não encontrada.",
+                "INVALID_LOGIN_CREDENTIALS": "E-mail ou senha incorretos.",
+                "INVALID_PASSWORD": "E-mail ou senha incorretos.",
+                "USER_DISABLED": "Esta conta foi desativada.",
+                "TOO_MANY_ATTEMPTS_TRY_LATER": "Muitas tentativas. Aguarde um pouco e tente novamente.",
+                "WEAK_PASSWORD : Password should be at least 6 characters": "Use uma senha com pelo menos 6 caracteres.",
+            }
+            raise CloudSyncError(messages.get(str(code), "Não foi possível autenticar no Firebase.")) from error
+        except (urllib.error.URLError, TimeoutError) as error:
+            raise CloudSyncError("Não foi possível conectar ao Firebase. Verifique a internet.") from error
 
     def sign_in(self, email: str, password: str) -> None:
-        result = self._request("/auth/v1/token?grant_type=password", method="POST", body={"email": email, "password": password})
+        result = self._auth_request(
+            f"{FIREBASE_IDENTITY_URL}/accounts:signInWithPassword?key={FIREBASE_API_KEY}",
+            {"email": email, "password": password, "returnSecureToken": True},
+        )
         self._store_session(result, email)
 
     def sign_up(self, email: str, password: str) -> bool:
-        result = self._request("/auth/v1/signup", method="POST", body={"email": email, "password": password})
-        if result.get("access_token"):
-            self._store_session(result, email)
-            return True
-        return False
+        result = self._auth_request(
+            f"{FIREBASE_IDENTITY_URL}/accounts:signUp?key={FIREBASE_API_KEY}",
+            {"email": email, "password": password, "returnSecureToken": True},
+        )
+        self._store_session(result, email)
+        return True
 
     def refresh_session(self) -> None:
-        result = self._request(
-            "/auth/v1/token?grant_type=refresh_token",
-            method="POST",
-            body={"refresh_token": self.settings.get("cloud_refresh_token", "")},
-            retry=False,
+        result = self._auth_request(
+            f"{FIREBASE_TOKEN_URL}?key={FIREBASE_API_KEY}",
+            {"grant_type": "refresh_token", "refresh_token": self.settings.get("cloud_refresh_token", "")},
+            form=True,
         )
         self._store_session(result, self.email)
 
     def _store_session(self, result: dict, email: str) -> None:
-        user = result.get("user") or {}
-        if not result.get("access_token") or not user.get("id"):
-            raise CloudSyncError("O Supabase não retornou uma sessão válida.")
+        access_token = result.get("idToken") or result.get("id_token")
+        refresh_token = result.get("refreshToken") or result.get("refresh_token")
+        user_id = result.get("localId") or result.get("user_id")
+        if not access_token or not user_id:
+            raise CloudSyncError("O Firebase não retornou uma sessão válida.")
         self.settings.update({
-            "cloud_access_token": result["access_token"],
-            "cloud_refresh_token": result.get("refresh_token", ""),
-            "cloud_user_id": user["id"],
+            "cloud_provider": "firebase",
+            "cloud_access_token": access_token,
+            "cloud_refresh_token": refresh_token or "",
+            "cloud_user_id": user_id,
             "cloud_email": email.strip().lower(),
         })
 
     def sign_out(self) -> None:
-        for key in ("cloud_access_token", "cloud_refresh_token", "cloud_user_id", "cloud_email"):
+        for key in ("cloud_provider", "cloud_access_token", "cloud_refresh_token", "cloud_user_id", "cloud_email"):
             self.settings.pop(key, None)
 
     def export_payload(self, connection: sqlite3.Connection) -> dict:
@@ -138,12 +186,15 @@ class CloudSync:
         for table in TABLES:
             columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
             tables[table] = [dict(zip(columns, row, strict=True)) for row in connection.execute(f"SELECT {','.join(columns)} FROM {table}")]
-        photos = {}
+        photos = []
         for row in tables["products"]:
             source = Path(str(row.get("photo") or ""))
             if source.is_file():
                 name = source.name
-                photos[name] = base64.b64encode(source.read_bytes()).decode("ascii")
+                photos.append({
+                    "name": name,
+                    "data": base64.b64encode(source.read_bytes()).decode("ascii"),
+                })
                 row["photo"] = name
         return {
             "format": 1,
@@ -172,8 +223,7 @@ class CloudSync:
         self.settings.pop("cloud_local_modified_at", None)
 
     def _upload_payload(self, payload: dict, revision: int) -> dict:
-        body = {
-            "workspace_key": SHARED_WORKSPACE_KEY,
+        snapshot = {
             "payload": payload,
             "revision": max(1, revision),
             "device_id": self.device_id,
@@ -181,13 +231,12 @@ class CloudSync:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         result = self._request(
-            "/rest/v1/shared_inventory_snapshot?on_conflict=workspace_key",
-            method="POST",
-            body=body,
+            f"/workspaces/{SHARED_WORKSPACE_KEY}.json",
+            method="PUT",
+            body=snapshot,
             authenticated=True,
-            headers={"Prefer": "resolution=merge-duplicates,return=representation"},
         )
-        snapshot = result[0] if result else body
+        snapshot = result if isinstance(result, dict) else snapshot
         self._remember_sync(payload, snapshot)
         return snapshot
 
@@ -197,12 +246,8 @@ class CloudSync:
         return self._upload_payload(payload, int((remote or {}).get("revision") or 0) + 1)
 
     def remote_snapshot(self) -> dict | None:
-        query = urllib.parse.urlencode({
-            "select": "payload,revision,updated_at,device_id,updated_by",
-            "workspace_key": f"eq.{SHARED_WORKSPACE_KEY}",
-        })
-        rows = self._request(f"/rest/v1/shared_inventory_snapshot?{query}", authenticated=True)
-        return rows[0] if rows else None
+        result = self._request(f"/workspaces/{SHARED_WORKSPACE_KEY}.json", authenticated=True)
+        return result if isinstance(result, dict) and result.get("payload") else None
 
     def _download_snapshot(self, connection: sqlite3.Connection, snapshot: dict) -> str:
         payload = snapshot["payload"]
@@ -222,12 +267,17 @@ class CloudSync:
             for row in rows:
                 if not isinstance(row, dict) or not row or not set(row).issubset(allowed_columns[table]):
                     raise CloudSyncError("A cópia na nuvem contém colunas inválidas.")
-        photos = payload.get("photos", {})
-        if not isinstance(photos, dict):
+        photos = payload.get("photos", [])
+        if not isinstance(photos, (dict, list)):
             raise CloudSyncError("A cópia na nuvem contém fotos inválidas.")
         decoded_photos: dict[str, bytes] = {}
         try:
-            for name, encoded in photos.items():
+            photo_items = (
+                photos.items()
+                if isinstance(photos, dict)
+                else ((item.get("name"), item.get("data")) for item in photos if isinstance(item, dict))
+            )
+            for name, encoded in photo_items:
                 if not isinstance(name, str) or not name.strip() or not isinstance(encoded, str):
                     raise ValueError
                 safe_name = Path(name).name
@@ -282,7 +332,7 @@ class CloudSync:
     def download(self, connection: sqlite3.Connection) -> str:
         snapshot = self.remote_snapshot()
         if not snapshot:
-            raise CloudSyncError("Ainda não existe uma cópia compartilhada no Supabase.")
+            raise CloudSyncError("Ainda não existe uma cópia compartilhada no Firebase.")
         return self._download_snapshot(connection, snapshot)
 
     def synchronize(self, connection: sqlite3.Connection, prefer_local: bool = False) -> dict:

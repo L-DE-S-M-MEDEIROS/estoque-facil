@@ -1,17 +1,22 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-
-import {
-  buildSheetSnapshot,
-  monthTitle,
-  todayInSaoPaulo,
-} from './supabase/functions/google-sheets-sync/logic.ts';
+import vm from 'node:vm';
 
 const appsScriptSource = readFileSync(new URL('./google_sheets/Code.gs', import.meta.url), 'utf8');
 const appsScriptManifest = JSON.parse(
   readFileSync(new URL('./google_sheets/appsscript.json', import.meta.url), 'utf8'),
 );
+const appsScriptContext = vm.createContext({
+  console, Object, Array, Date, Number, String, RegExp, Math, JSON,
+  Utilities: {
+    formatDate(date, _zone, format) {
+      if (format !== 'yyyy-MM-dd') throw new Error('Formato inesperado');
+      return date.toISOString().slice(0, 10);
+    },
+  },
+});
+vm.runInContext(appsScriptSource, appsScriptContext);
 
 function payload() {
   return {
@@ -33,12 +38,12 @@ function payload() {
 }
 
 test('monta estoque atual, nome combinado e abas mensais', () => {
-  const result = buildSheetSnapshot(payload(), '2026-09-10');
+  const result = appsScriptContext.montarSnapshotPlanilha_(payload(), '2026-09-10');
   assert.equal(result.current.length, 1);
-  assert.deepEqual(result.current[0], { product_id: 7, product: 'CASINHA AZUL BEBÊ', group_name: 'CASINHA', stock: 12 });
-  assert.deepEqual(result.months.map((item) => item.title), ['AGOSTO 2026', 'SETEMBRO 2026']);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.current[0])), { product_id: 7, product: 'CASINHA AZUL BEBÊ', group_name: 'CASINHA', stock: 12 });
+  assert.deepEqual(Array.from(result.months, item => item.title), ['AGOSTO 2026', 'SETEMBRO 2026']);
   assert.equal(result.months[1].rows[0].system_stock, 12);
-  assert.equal(monthTitle('2026-09'), 'SETEMBRO 2026');
+  assert.equal(appsScriptContext.tituloMesFirebase_('2026-09'), 'SETEMBRO 2026');
 });
 
 test('ignora contagens do aplicativo e entrega somente o estoque do sistema', () => {
@@ -50,7 +55,7 @@ test('ignora contagens do aplicativo e entrega somente o estoque do sistema', ()
     counted_quantity: 4,
     difference: -95,
   });
-  const result = buildSheetSnapshot(source, '2026-09-10');
+  const result = appsScriptContext.montarSnapshotPlanilha_(source, '2026-09-10');
   const row = result.months.find((item) => item.month === '2026-09').rows[0];
   assert.equal(row.system_stock, 12);
   assert.equal(row.counted, null);
@@ -62,13 +67,9 @@ test('produto TESTE sem grupo fica fora de todas as abas, sem ocultar produtos r
   const source = payload();
   source.tables.products.push({ id: 78, name: ' TESTE ', group_name: '', created_at: '2026-08-20' });
   source.tables.products.push({ id: 79, name: 'TESTE', group_name: 'Casinha', created_at: '2026-08-20' });
-  const result = buildSheetSnapshot(source, '2026-09-11');
-  assert.deepEqual(result.current.map(row => row.product_id), [7, 79]);
+  const result = appsScriptContext.montarSnapshotPlanilha_(source, '2026-09-11');
+  assert.deepEqual(Array.from(result.current, row => row.product_id), [7, 79]);
   assert.ok(result.months.every(month => month.rows.every(row => row.product_id !== 78)));
-});
-
-test('usa o calendário de São Paulo perto da virada UTC', () => {
-  assert.equal(todayInSaoPaulo(new Date('2026-09-11T01:30:00.000Z')), '2026-09-10');
 });
 
 test('Apps Script sincroniza sozinho e abre a planilha pelo ID', () => {
@@ -76,6 +77,9 @@ test('Apps Script sincroniza sozinho e abre a planilha pelo ID', () => {
   assert.match(appsScriptSource, /timeBased\(\)\.everyMinutes\(1\)\.create\(\)/);
   assert.match(appsScriptSource, /forSpreadsheet\(spreadsheet\)\.onOpen\(\)\.create\(\)/);
   assert.ok(appsScriptManifest.oauthScopes.includes('https://www.googleapis.com/auth/spreadsheets'));
+  assert.ok(appsScriptManifest.oauthScopes.includes('https://www.googleapis.com/auth/firebase.database'));
+  assert.match(appsScriptSource, /estoque-bolsas-baby-default-rtdb\.firebaseio\.com/);
+  assert.doesNotMatch(appsScriptSource, /supabase/i);
 });
 
 test('Apps Script evita redesenhar abas sem alteração de dados', () => {
@@ -103,5 +107,5 @@ test('Apps Script mantém contagem local e aplica o novo tema visual', () => {
   assert.match(appsScriptSource, /requireNumberGreaterThanOrEqualTo\(0\)/);
   assert.match(appsScriptSource, /CONTAGEM_LOCAL_/);
   assert.match(appsScriptSource, /'=IF\(RC\[-1\]=\"\";\"\";RC\[-1\]-RC\[-2\]\)'/);
-  assert.doesNotMatch(appsScriptSource, /chamarSupabase_\(['"]record_count['"]/);
+  assert.doesNotMatch(appsScriptSource, /chamarSupabase_/);
 });

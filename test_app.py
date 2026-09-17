@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -480,7 +481,7 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertEqual(payload["format"], 1)
         self.assertEqual(set(payload), {"format", "app", "exported_at", "tables", "photos"})
         self.assertEqual(payload["tables"]["products"][0]["photo"], "produto.png")
-        self.assertIn("produto.png", payload["photos"])
+        self.assertIn({"name": "produto.png", "data": "aW1hZ2Vt"}, payload["photos"])
         self.assertNotIn("simulation", payload)
 
     def test_monthly_excel_count_is_audited_and_updates_the_final_stock(self):
@@ -573,6 +574,43 @@ class InventoryDatabaseTests(unittest.TestCase):
         self.assertEqual(counts[0].product_id, product_id)
         self.assertEqual(counts[0].quantity, 9)
         self.assertEqual(counts[0].month, month)
+
+    def test_monthly_excel_workbook_detects_stale_content_and_replaces_atomically(self):
+        month = date.today().strftime("%Y-%m")
+        path = Path(self.temporary_directory.name) / "ESTOQUE SICRONIZADO.xlsx"
+        from openpyxl import Workbook, load_workbook
+
+        blank = Workbook()
+        blank.save(path)
+        blank.close()
+        workbook = MonthlyStockWorkbook(path)
+        months = [{
+            "month": month,
+            "rows": [{
+                "product_id": 1,
+                "product": "CASINHA AZUL BEBÊ",
+                "system_stock": 12,
+                "counted": None,
+                "post_count_delta": 0,
+                "final_stock": 12,
+            }],
+            "is_current": True,
+        }]
+
+        original_replace = os.replace
+        with patch("excel_sync.os.replace", wraps=original_replace) as replace:
+            workbook.write(months)
+        replace.assert_called_once()
+        self.assertTrue(workbook.matches(months))
+
+        stale = load_workbook(path)
+        stale[CURRENT_SHEET_TITLE]["B2"] = 99
+        stale.save(path)
+        stale.close()
+        self.assertFalse(workbook.matches(months))
+
+        workbook.write(months)
+        self.assertTrue(workbook.matches(months))
 
     def test_cloud_download_rejects_unknown_columns_without_changing_local_data(self):
         product_id = self.create_product()
@@ -978,6 +1016,7 @@ class SharedCloudSyncTests(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.settings = {
+            "cloud_provider": "firebase",
             "cloud_access_token": "token",
             "cloud_user_id": "00000000-0000-0000-0000-000000000001",
             "cloud_device_id": "00000000-0000-0000-0000-000000000002",
@@ -1001,12 +1040,13 @@ class SharedCloudSyncTests(unittest.TestCase):
 
     def test_upload_targets_shared_workspace_for_every_authenticated_user(self):
         payload = self.payload("CARAMELO")
-        with patch.object(self.sync, "_request", return_value=[{"revision": 3, "updated_at": "2026-08-21T15:00:00+00:00"}]) as request:
+        with patch.object(self.sync, "_request", return_value={"revision": 3, "updated_at": "2026-08-21T15:00:00+00:00"}) as request:
             self.sync._upload_payload(payload, 3)
         path = request.call_args.args[0]
         body = request.call_args.kwargs["body"]
-        self.assertIn("shared_inventory_snapshot", path)
-        self.assertEqual(body["workspace_key"], "bolsas-baby")
+        self.assertEqual(path, "/workspaces/bolsas-baby.json")
+        self.assertEqual(request.call_args.kwargs["method"], "PUT")
+        self.assertTrue(request.call_args.kwargs["authenticated"])
         self.assertEqual(body["updated_by"], self.settings["cloud_user_id"])
         self.assertNotIn("owner_id", body)
 

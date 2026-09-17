@@ -29,6 +29,7 @@ UI_DEFAULTS: dict[str, Any] = {
 
 CLOUD_SESSION_KEYS = frozenset(
     {
+        "cloud_provider",
         "cloud_access_token",
         "cloud_refresh_token",
         "cloud_user_id",
@@ -105,7 +106,7 @@ class LocalPreferences:
 
 
 class LocalCloudSession:
-    """Persist Supabase authentication locally without accepting UI preferences."""
+    """Persist Firebase authentication locally without accepting UI preferences."""
 
     def __init__(self, path: Path, legacy: dict[str, Any] | None = None):
         self.path = path

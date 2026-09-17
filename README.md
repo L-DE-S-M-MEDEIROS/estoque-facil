@@ -2,12 +2,12 @@
 
 Aplicativo desktop nativo para Windows, desenvolvido em Python com Tkinter e SQLite.
 
-## Sincronização com Supabase
+## Sincronização com Firebase
 
-Na página **Configurações**, use o cartão **Supabase — estoque online compartilhado** para criar ou entrar em uma conta. Todos os usuários autenticados neste aplicativo compartilham o mesmo estoque, e produtos, movimentações, cadastros e fotos são sincronizados automaticamente no projeto separado `Estoque Bolsas Baby`.
+Na página **Configurações**, use o cartão **Firebase — estoque online compartilhado** para criar ou entrar na conta autorizada. Produtos, movimentações, cadastros e fotos são sincronizados automaticamente no projeto separado `Estoque Bolsas Baby` (`estoque-bolsas-baby`).
 
-- O SQLite local é apenas um cache operacional; o Supabase é a fonte central para operar em qualquer computador.
-- Todas as contas autenticadas do aplicativo acessam o estoque compartilhado; usuários anônimos continuam bloqueados por Row Level Security (RLS).
+- O SQLite local é apenas um cache operacional; o Firebase Realtime Database é a fonte central para operar em qualquer computador.
+- O banco exige autenticação e restringe o acesso ao e-mail autorizado; usuários anônimos permanecem bloqueados pelas regras do Firebase.
 - Ao entrar, ao alterar dados e a cada 20 segundos, o aplicativo compara a cópia local com a nuvem e atualiza os outros computadores.
 - A senha não é armazenada; somente a sessão de acesso fica salva neste computador.
 - Antes de baixar e substituir os dados locais, o aplicativo cria um backup automático.
@@ -17,17 +17,17 @@ Na página **Configurações**, use o cartão **Supabase — estoque online comp
 
 ## Visualização online no Google Planilhas
 
-O arquivo **ESTOQUE SICRONIZADO** do Google Planilhas é atualizado automaticamente por um serviço do Supabase. Ele pode ser aberto pelo cartão **Google Planilhas — sincronização automática online** em **Configurações**.
+O arquivo **ESTOQUE SICRONIZADO** do Google Planilhas consulta diretamente o Firebase usando a autorização Google do proprietário. Ele pode ser aberto pelo cartão **Google Planilhas — sincronização automática online** em **Configurações**.
 
-- O Supabase e o banco local continuam sendo a fonte oficial do estoque; a planilha oferece uma visualização simples e um campo de contagem mensal.
+- O Firebase e o banco local continuam sendo a fonte oficial do estoque; a planilha oferece uma visualização simples e um campo de contagem mensal.
 - A primeira aba é sempre **ESTOQUE ATUAL**, protegida contra edição, com todos os produtos, seus saldos atuais e o total no final.
 - Depois dela, o aplicativo cria uma aba para cada mês, com o produto no formato `GRUPO/MODELO + PRODUTO + VARIAÇÃO`.
 - Cada aba possui as colunas **Produto**, **Estoque do sistema**, **Contagem**, **Diferença** e **Estoque final**, além do total do estoque final.
 - Somente a coluna **Contagem** fica liberada para digitação. Uma diferença negativa aparece em vermelho e uma positiva em verde.
-- A coluna **Contagem** pertence somente ao Google Planilhas: não é preenchida pelo aplicativo e não altera o estoque no Supabase.
+- A coluna **Contagem** pertence somente ao Google Planilhas: não é preenchida pelo aplicativo e não altera o estoque no Firebase.
 - No mês atual, **Estoque do sistema** acompanha o mesmo saldo exibido em **ESTOQUE ATUAL**; novos produtos e movimentações aparecem automaticamente.
 - Não há arquivo local, pasta OneDrive nem cliente do OneDrive obrigatório. Qualquer computador conectado à internet pode visualizar a mesma planilha.
-- A planilha consulta o Supabase automaticamente a cada minuto, mesmo que este computador esteja desligado.
+- A planilha consulta o Firebase automaticamente a cada minuto, mesmo que este computador esteja desligado.
 
 ## Recursos
 
@@ -65,7 +65,7 @@ O arquivo **ESTOQUE SICRONIZADO** do Google Planilhas é atualizado automaticame
 - Editor de SKU responsivo com busca curta, tabela virtualizada e seleção de produtos por clique, sem criar dezenas de controles pesados
 - Aba **Simulação** para montar um conjunto de entrada ou saída que mostra somente os produtos adicionados e compara, lado a lado, o estoque atual com o saldo simulado, sem registrar movimentações
 - Impressão da Simulação em PDF com uma lista de separação contendo somente produto e quantidade simulada; o estoque atual e o saldo simulado permanecem exclusivos da tela do aplicativo
-- Rascunho da simulação salvo somente no computador do usuário, fora da sincronização do Supabase
+- Rascunho da simulação salvo somente no computador do usuário, fora da sincronização do Firebase
 - Pesquisa rápida na movimentação por parte do nome, grupo, variação ou categoria, ignorando diferenças de acento e maiúsculas
 - Aba **Defeito / Devolução** para retirar ou devolver uma unidade rapidamente, com a mesma busca simplificada e limpeza automática após o registro
 - Pesquisas de produto otimizadas com resultado resumido, cache seguro e atualização automática após alterações locais ou sincronizadas
@@ -83,7 +83,7 @@ O arquivo **ESTOQUE SICRONIZADO** do Google Planilhas é atualizado automaticame
 - Download seguro pelo próprio aplicativo, validação SHA-256, substituição da versão anterior e reinício automático
 - Interface adaptável a Full HD, 2K e 4K, respeitando a escala de DPI do Windows
 - Temas Light off-white e Dark grafite com azul neon
-- Preferências da interface salvas localmente por usuário do Windows, separadas da sessão e dos dados sincronizados pelo Supabase
+- Preferências da interface salvas localmente por usuário do Windows, separadas da sessão e dos dados sincronizados pelo Firebase
 - Componentes arredondados, espaçamento amplo e hierarquia tipográfica moderna
 - Ícones próprios em alta resolução com redução antialiasada
 - Navegação priorizando Estoque atual, Movimentações e Produtos

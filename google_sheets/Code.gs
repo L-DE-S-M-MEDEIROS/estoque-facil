@@ -1,5 +1,6 @@
 const ESTOQUE_CONFIG = Object.freeze({
-  endpoint: 'https://raleparpityoscsykssk.supabase.co/functions/v1/google-sheets-sync',
+  firebaseDatabaseUrl: 'https://estoque-bolsas-baby-default-rtdb.firebaseio.com',
+  firebaseWorkspace: 'bolsas-baby',
   spreadsheetId: '1eXMlyvFpO_-MkD8oaux1NrlupqR-ECNyEZS1XSgJIiY',
   currentSheet: 'ESTOQUE ATUAL',
   ordersSheet: 'PEDIDOS',
@@ -57,7 +58,7 @@ function atualizarEstoque(forcar) {
   if (!lock.tryLock(25000)) return 0;
   const properties = PropertiesService.getDocumentProperties();
   try {
-    const snapshot = chamarSupabase_('snapshot', {});
+    const snapshot = buscarSnapshotFirebase_();
     const updatedSheets = escreverEstoque_(snapshot, forcar === true);
     if (updatedSheets > 0) SpreadsheetApp.flush();
     properties.setProperty(ESTOQUE_CONFIG.propertyPrefix + 'ULTIMA_VERIFICACAO', new Date().toISOString());
@@ -80,28 +81,144 @@ function enviarContagem(event) {
   return;
 }
 
-function chamarSupabase_(action, fields) {
-  const body = Object.assign({
-    action: action,
-    spreadsheet_id: ESTOQUE_CONFIG.spreadsheetId,
-  }, fields || {});
-  const response = fetchComRetry_(ESTOQUE_CONFIG.endpoint, {
-    method: 'post',
-    contentType: 'application/json',
+function buscarSnapshotFirebase_() {
+  const url = ESTOQUE_CONFIG.firebaseDatabaseUrl + '/workspaces/'
+    + encodeURIComponent(ESTOQUE_CONFIG.firebaseWorkspace) + '.json';
+  const response = fetchComRetry_(url, {
+    method: 'get',
     headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
-    payload: JSON.stringify(body),
     muteHttpExceptions: true,
   });
   let parsed;
   try {
     parsed = JSON.parse(response.getContentText() || '{}');
   } catch (error) {
-    throw new Error('O serviço online respondeu em formato inválido.');
+    throw new Error('O Firebase respondeu em formato inválido.');
   }
-  if (response.getResponseCode() < 200 || response.getResponseCode() >= 300 || parsed.ok !== true) {
-    throw new Error(parsed.error || 'Não foi possível sincronizar o estoque.');
+  if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) {
+    throw new Error((parsed && parsed.error) || 'Não foi possível consultar o Firebase.');
   }
-  return parsed;
+  if (!parsed || !parsed.payload || parsed.payload.format !== 1) {
+    throw new Error('O estoque online ainda não possui uma cópia válida.');
+  }
+  const projection = montarSnapshotPlanilha_(parsed.payload, Utilities.formatDate(
+    new Date(), ESTOQUE_CONFIG.timeZone, 'yyyy-MM-dd'
+  ));
+  return Object.assign({
+    ok: true,
+    revision: Number(parsed.revision || 1),
+    updated_at: String(parsed.updated_at || parsed.payload.exported_at || ''),
+  }, projection);
+}
+
+const NOMES_MESES_ = Object.freeze([
+  '', 'JANEIRO', 'FEVEREIRO', 'MARÇO', 'ABRIL', 'MAIO', 'JUNHO',
+  'JULHO', 'AGOSTO', 'SETEMBRO', 'OUTUBRO', 'NOVEMBRO', 'DEZEMBRO',
+]);
+
+function registroFirebase_(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function linhasFirebase_(payload, table) {
+  const value = payload.tables && payload.tables[table];
+  return Array.isArray(value) ? value.map(registroFirebase_) : [];
+}
+
+function numeroFirebase_(value, fallback) {
+  const result = Number(value);
+  return Number.isFinite(result) ? result : (fallback === undefined ? 0 : fallback);
+}
+
+function inteiroFirebase_(value) {
+  const result = numeroFirebase_(value, NaN);
+  return Number.isInteger(result) ? result : 0;
+}
+
+function textoFirebase_(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function dataFirebase_(value) {
+  return textoFirebase_(value).slice(0, 10);
+}
+
+function ultimoDiaMesFirebase_(month) {
+  const parts = month.split('-').map(Number);
+  return Utilities.formatDate(new Date(Date.UTC(parts[0], parts[1], 0)), 'UTC', 'yyyy-MM-dd');
+}
+
+function tituloMesFirebase_(month) {
+  const match = /^(\d{4})-(\d{2})$/.exec(month);
+  if (!match || Number(match[2]) < 1 || Number(match[2]) > 12) throw new Error('Mês inválido.');
+  return NOMES_MESES_[Number(match[2])] + ' ' + match[1];
+}
+
+function sequenciaMesesFirebase_(first, last) {
+  const result = [];
+  let parts = first.split('-').map(Number);
+  const end = last.split('-').map(Number);
+  while ((parts[0] < end[0] || (parts[0] === end[0] && parts[1] <= end[1])) && result.length < 120) {
+    result.push(String(parts[0]).padStart(4, '0') + '-' + String(parts[1]).padStart(2, '0'));
+    parts[1] += 1;
+    if (parts[1] === 13) { parts[0] += 1; parts[1] = 1; }
+  }
+  return result;
+}
+
+function nomeProdutoFirebase_(product) {
+  return ['group_name', 'name', 'variant'].map(function(key) {
+    return textoFirebase_(product[key]);
+  }).filter(Boolean).join(' ').toLocaleUpperCase('pt-BR');
+}
+
+function saldoAteFirebase_(movements, productId, endDate) {
+  return movements.reduce(function(total, movement) {
+    return inteiroFirebase_(movement.product_id) === productId && dataFirebase_(movement.movement_date) <= endDate
+      ? total + numeroFirebase_(movement.quantity) : total;
+  }, 0);
+}
+
+function montarSnapshotPlanilha_(payload, today) {
+  const products = linhasFirebase_(payload, 'products').filter(function(product) {
+    return !(textoFirebase_(product.name).toLocaleLowerCase('pt-BR') === 'teste' && !textoFirebase_(product.group_name));
+  }).sort(function(left, right) {
+    return nomeProdutoFirebase_(left).localeCompare(nomeProdutoFirebase_(right), 'pt-BR', { sensitivity: 'base' });
+  });
+  const movements = linhasFirebase_(payload, 'movements');
+  const currentMonth = today.slice(0, 7);
+  const datedValues = products.map(function(item) { return dataFirebase_(item.created_at).slice(0, 7); })
+    .concat(movements.map(function(item) { return dataFirebase_(item.movement_date).slice(0, 7); }))
+    .filter(function(value) { return /^\d{4}-\d{2}$/.test(value); }).sort();
+  const firstMonth = datedValues.length ? datedValues[0] : currentMonth;
+  const months = sequenciaMesesFirebase_(firstMonth, currentMonth).map(function(month) {
+    const endDate = month === currentMonth ? today : ultimoDiaMesFirebase_(month);
+    const monthRows = [];
+    products.forEach(function(product) {
+      const productId = inteiroFirebase_(product.id);
+      const existed = dataFirebase_(product.created_at) <= endDate || movements.some(function(movement) {
+        return inteiroFirebase_(movement.product_id) === productId && dataFirebase_(movement.movement_date) <= endDate;
+      });
+      if (!productId || !existed) return;
+      const finalStock = saldoAteFirebase_(movements, productId, endDate);
+      monthRows.push({
+        product_id: productId,
+        product: nomeProdutoFirebase_(product),
+        group_name: textoFirebase_(product.group_name).toLocaleUpperCase('pt-BR'),
+        system_stock: finalStock,
+        counted: null,
+        difference: null,
+        post_count_delta: 0,
+        final_stock: finalStock,
+      });
+    });
+    return { month: month, title: tituloMesFirebase_(month), is_current: month === currentMonth, rows: monthRows };
+  });
+  const currentMonthData = months.find(function(item) { return item.is_current; });
+  const current = currentMonthData ? currentMonthData.rows.map(function(item) {
+    return { product_id: item.product_id, product: item.product, group_name: item.group_name, stock: item.final_stock };
+  }) : [];
+  return { current: current, months: months };
 }
 
 function fetchComRetry_(url, options) {
@@ -169,7 +286,7 @@ function escreverEstoque_(snapshot, forcar) {
   const pedidosSignature = assinaturaDados_('PEDIDOS', currentRows);
   const pedidosProperty = ESTOQUE_CONFIG.propertyPrefix + 'ASSINATURA_PEDIDOS';
   if (forcar || pedidosCreated || properties.getProperty(pedidosProperty) !== pedidosSignature) {
-    escreverPedidos_(pedidos, currentRows, snapshot.updated_at);
+    escreverPedidosDiminuindo_(pedidos, currentRows, snapshot.updated_at);
     properties.setProperty(pedidosProperty, pedidosSignature);
     updatedSheets += 1;
   }

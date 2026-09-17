@@ -35,7 +35,7 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.12"
+APP_VERSION = "1.2.13"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1eXMlyvFpO_-MkD8oaux1NrlupqR-ECNyEZS1XSgJIiY/edit?usp=sharing"
 SEARCH_RESULT_LIMIT = 18
@@ -2454,7 +2454,7 @@ class CloudLoginDialog(BrandedToplevel):
     def __init__(self, parent: "EstoqueApp"):
         super().__init__(parent, fg_color=COLORS["background"])
         self.parent = parent
-        self.title("Entrar no Supabase")
+        self.title("Entrar no Firebase")
         self.geometry(f"480x410+{parent.winfo_x()+180}+{parent.winfo_y()+100}")
         self.resizable(False, False); self.transient(parent); self.grab_set()
         self.grid_columnconfigure(0, weight=1)
@@ -2555,7 +2555,7 @@ class EstoqueApp(ctk.CTk):
     def save_cloud_settings(self): self.cloud_session_store.values = self.cloud_settings; self.cloud_session_store.save(); self.cloud_settings = self.cloud_session_store.values
 
     def schedule_data_sync(self):
-        # O Supabase é a fonte central; o Google Planilhas consulta essa cópia
+        # O Firebase é a fonte central; o Google Planilhas consulta essa cópia
         # online diretamente e não depende deste computador.
         self.schedule_cloud_sync()
 
@@ -2769,7 +2769,7 @@ class EstoqueApp(ctk.CTk):
         notice=ctk.CTkFrame(page,fg_color=COLORS["accent_soft"],corner_radius=12,border_width=1,border_color=COLORS["accent"])
         notice.pack(fill="x",pady=(0,14))
         ctk.CTkLabel(notice,text="SIMULAÇÃO SEGURA",text_color=COLORS["accent"],font=ctk.CTkFont("Inter",11,"bold")).pack(anchor="w",padx=18,pady=(12,2))
-        ctk.CTkLabel(notice,text="Este rascunho fica salvo somente neste computador. Nada será registrado nas movimentações ou enviado ao Supabase.",text_color=COLORS["text"],font=ctk.CTkFont("Inter",10),anchor="w",wraplength=920).pack(fill="x",padx=18,pady=(0,12))
+        ctk.CTkLabel(notice,text="Este rascunho fica salvo somente neste computador. Nada será registrado nas movimentações ou enviado ao Firebase.",text_color=COLORS["text"],font=ctk.CTkFont("Inter",10),anchor="w",wraplength=920).pack(fill="x",padx=18,pady=(0,12))
 
         stored=self.simulation_store.values
         self.simulation_items=[dict(item) for item in stored.get("items",[])]
@@ -3989,10 +3989,10 @@ class EstoqueApp(ctk.CTk):
 
     def settings_page(self):
         page=ctk.CTkFrame(self.content,fg_color="transparent");PageTitle(page,"Configurações","Personalize a aparência e proteja seus dados.").pack(fill="x",pady=(0,22))
-        appearance=Card(page);appearance.pack(fill="x",pady=(0,16));row=ctk.CTkFrame(appearance,fg_color="transparent");row.pack(fill="x",padx=22,pady=20);ctk.CTkLabel(row,text="Tema da interface",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w");ctk.CTkLabel(row,text="Escolha entre o modo claro off-white e o modo escuro em grafite.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(4,4));ctk.CTkLabel(row,text="Tema, janela, última tela e filtros ficam somente neste usuário do Windows e não são enviados ao Supabase.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(anchor="w",pady=(0,12));self.theme_selector=ctk.CTkSegmentedButton(row,values=["Light","Dark"],command=self.change_theme,selected_color=COLORS["accent"],selected_hover_color=COLORS["accent_hover"]);self.theme_selector.pack(anchor="w");self.theme_selector.set(self.settings.get("theme","Light"))
+        appearance=Card(page);appearance.pack(fill="x",pady=(0,16));row=ctk.CTkFrame(appearance,fg_color="transparent");row.pack(fill="x",padx=22,pady=20);ctk.CTkLabel(row,text="Tema da interface",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w");ctk.CTkLabel(row,text="Escolha entre o modo claro off-white e o modo escuro em grafite.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(4,4));ctk.CTkLabel(row,text="Tema, janela, última tela e filtros ficam somente neste usuário do Windows e não são enviados ao Firebase.",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10)).pack(anchor="w",pady=(0,12));self.theme_selector=ctk.CTkSegmentedButton(row,values=["Light","Dark"],command=self.change_theme,selected_color=COLORS["accent"],selected_hover_color=COLORS["accent_hover"]);self.theme_selector.pack(anchor="w");self.theme_selector.set(self.settings.get("theme","Light"))
         cloud=Card(page);cloud.pack(fill="x",pady=(0,16));cloud_row=ctk.CTkFrame(cloud,fg_color="transparent");cloud_row.pack(fill="x",padx=22,pady=20)
         cloud_text=ctk.CTkFrame(cloud_row,fg_color="transparent");cloud_text.pack(side="left",fill="x",expand=True)
-        ctk.CTkLabel(cloud_text,text="Supabase — estoque online compartilhado",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w")
+        ctk.CTkLabel(cloud_text,text="Firebase — estoque online compartilhado",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w")
         self.cloud_status=tk.StringVar();ctk.CTkLabel(cloud_text,textvariable=self.cloud_status,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(4,0));self.update_cloud_status()
         cloud_actions=ctk.CTkFrame(cloud_row,fg_color="transparent");cloud_actions.pack(side="right")
         ctk.CTkButton(cloud_actions,text="Conta",width=90,height=38,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.cloud_account).pack(side="left",padx=4)
@@ -4001,7 +4001,7 @@ class EstoqueApp(ctk.CTk):
         sheets=Card(page);sheets.pack(fill="x",pady=(0,16));sheets_row=ctk.CTkFrame(sheets,fg_color="transparent");sheets_row.pack(fill="x",padx=22,pady=18)
         sheets_text=ctk.CTkFrame(sheets_row,fg_color="transparent");sheets_text.pack(fill="x")
         ctk.CTkLabel(sheets_text,text="Google Planilhas — estoque online",text_color=COLORS["text"],font=ctk.CTkFont("Inter",15,"bold")).pack(anchor="w")
-        self.google_sheets_status=tk.StringVar(value="Atualização automática pelo Supabase — sem Excel, OneDrive ou computador ligado")
+        self.google_sheets_status=tk.StringVar(value="Atualização automática pelo Firebase — sem Excel, OneDrive ou computador ligado")
         ctk.CTkLabel(sheets_text,textvariable=self.google_sheets_status,text_color=COLORS["muted"],font=ctk.CTkFont("Inter",11)).pack(anchor="w",pady=(4,0))
         sheets_actions=ctk.CTkFrame(sheets_row,fg_color="transparent");sheets_actions.pack(anchor="w",pady=(12,0))
         ctk.CTkButton(sheets_actions,text="Abrir Google Planilhas",width=165,height=38,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=lambda:webbrowser.open(GOOGLE_SHEETS_URL)).pack(side="left",padx=4)
@@ -4026,14 +4026,14 @@ class EstoqueApp(ctk.CTk):
 
     def cloud_upload(self):
         if not self.cloud.signed_in:CloudLoginDialog(self);return
-        if not messagebox.askyesno(APP_NAME,"Enviar agora os produtos, movimentações, cadastros, vínculos de SKU e fotos para o estoque compartilhado no Supabase?",parent=self):return
+        if not messagebox.askyesno(APP_NAME,"Enviar agora os produtos, movimentações, cadastros, vínculos de SKU e fotos para o estoque compartilhado no Firebase?",parent=self):return
         try:self.cloud.upload(self.db.db);self.save_cloud_settings()
         except CloudSyncError as error:messagebox.showerror(APP_NAME,str(error),parent=self);return
-        messagebox.showinfo(APP_NAME,"Dados enviados e protegidos no Supabase.",parent=self)
+        messagebox.showinfo(APP_NAME,"Dados enviados e protegidos no Firebase.",parent=self)
 
     def cloud_download(self):
         if not self.cloud.signed_in:CloudLoginDialog(self);return
-        if not messagebox.askyesno(APP_NAME,"Baixar a cópia do Supabase e substituir os dados locais?\n\nUm backup local de segurança será criado automaticamente.",icon="warning",parent=self):return
+        if not messagebox.askyesno(APP_NAME,"Baixar a cópia do Firebase e substituir os dados locais?\n\nUm backup local de segurança será criado automaticamente.",icon="warning",parent=self):return
         try:updated_at=self.cloud.download(self.db.db);self.save_cloud_settings()
         except (CloudSyncError,KeyError,ValueError,sqlite3.Error,OSError) as error:messagebox.showerror(APP_NAME,f"Não foi possível baixar os dados.\n\n{error}",parent=self);return
         self.refresh_all();messagebox.showinfo(APP_NAME,f"Dados restaurados da nuvem.\nCópia remota: {updated_at[:19].replace('T',' ')}",parent=self)
