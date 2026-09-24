@@ -22,6 +22,8 @@
 # production
 /build
 /dist
+build_*/
+dist_*/
 *.spec
 *.zip
 __pycache__/

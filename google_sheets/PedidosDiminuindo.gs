@@ -26,7 +26,7 @@ function escreverPedidosDiminuindo_(sheet, rows, updatedAt) {
       const m = manual[r.product_id] || ['', '', '', '', ''];
       return [r.product, r.stock, m[0], m[1], m[2], m[3], '', m[4], r.product_id];
     }));
-    sheet.getRange(2, 7, rows.length, 1).setFormulasR1C1(rows.map(() => ['=SUM(RC[-5]:RC[-1])']));
+    sheet.getRange(2, 7, rows.length, 1).setFormulasR1C1(rows.map(() => ['=SUM(RC[-5]:RC[-2])-SUM(RC[-1])']));
     estilizarCorpo_(sheet, rows.length, 8);
     estilizarProdutos_(sheet, rows.length);
     sheet.getRange(2, 2, rows.length, 6).setNumberFormat('#,##0');

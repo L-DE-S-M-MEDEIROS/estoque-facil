@@ -35,7 +35,7 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.15"
+APP_VERSION = "1.2.16"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1eXMlyvFpO_-MkD8oaux1NrlupqR-ECNyEZS1XSgJIiY/edit?usp=sharing"
 SEARCH_RESULT_LIMIT = 18
@@ -4044,7 +4044,10 @@ class EstoqueApp(ctk.CTk):
         if getattr(self,"cloud_sync_timer",None) is not None:
             try:self.after_cancel(self.cloud_sync_timer)
             except (tk.TclError,ValueError):pass
-        self.cloud_sync_timer=self.after(1800,lambda:self.start_cloud_sync(silent=True))
+        # Uma movimentação local deve ser enviada logo após o commit. O
+        # sincronizador roda em thread, então este atraso curto não bloqueia a
+        # interface e evita que uma leitura remota sobrescreva a baixa local.
+        self.cloud_sync_timer=self.after(250,lambda:self.start_cloud_sync(silent=True,prefer_local=True))
 
     def start_cloud_sync(self,silent=True,prefer_local=False):
         if not self.cloud.signed_in:return
@@ -4075,7 +4078,7 @@ class EstoqueApp(ctk.CTk):
                 messages={"uploaded":"Dados locais enviados ao estoque compartilhado.","downloaded":"Este computador recebeu os dados mais recentes dos outros usuários.","unchanged":"Todos os usuários já estão sincronizados."}
                 messagebox.showinfo(APP_NAME,messages.get(action,"Sincronização concluída."),parent=self)
         elif not silent:messagebox.showerror(APP_NAME,result,parent=self)
-        if self.cloud_sync_pending:self.after(300,lambda:self.start_cloud_sync(silent=True))
+        if self.cloud_sync_pending:self.after(100,lambda:self.start_cloud_sync(silent=True,prefer_local=True))
 
     def periodic_cloud_sync(self):
         if self.cloud.signed_in:self.start_cloud_sync(silent=True)
