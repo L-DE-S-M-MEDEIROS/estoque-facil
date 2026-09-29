@@ -1133,7 +1133,7 @@ class SharedCloudSyncTests(unittest.TestCase):
         remote_payload = self.payload("VERDE")
         self.settings["cloud_last_fingerprint"] = self.sync.payload_fingerprint(local)
         remote = {"payload": remote_payload, "revision": 4, "updated_at": "2026-08-21T15:00:00+00:00"}
-        with patch.object(self.sync, "export_payload", return_value=local), patch.object(self.sync, "remote_snapshot", return_value=remote), patch.object(self.sync, "_download_snapshot", return_value=remote["updated_at"]) as download:
+        with patch.object(self.sync, "_local_snapshot", return_value=(local, 0, False)), patch("cloud_sync.get_sync_state", return_value=(0, 0)), patch("cloud_sync.has_pending_sync", return_value=False), patch.object(self.sync, "remote_snapshot", return_value=remote), patch.object(self.sync, "_download_snapshot", return_value=remote["updated_at"]) as download:
             result = self.sync.synchronize(object())
         self.assertEqual(result["action"], "downloaded")
         download.assert_called_once()

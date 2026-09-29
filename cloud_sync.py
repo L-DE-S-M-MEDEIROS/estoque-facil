@@ -13,30 +13,27 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from database_utils import database_integrity_errors, register_database_functions
+from database_utils import (
+    INVENTORY_TABLES, acknowledge_sync, database_integrity_errors,
+    get_sync_state, has_pending_sync, register_database_functions,
+)
 
 
 FIREBASE_API_KEY = "AIzaSyBzAJgXOVYuduVdd3DNdlURAtNK-ZPAP_E"
 FIREBASE_DATABASE_URL = "https://estoque-bolsas-baby-default-rtdb.firebaseio.com"
 FIREBASE_IDENTITY_URL = "https://identitytoolkit.googleapis.com/v1"
 FIREBASE_TOKEN_URL = "https://securetoken.googleapis.com/v1/token"
-TABLES = (
-    "operation_types",
-    "users",
-    "product_groups",
-    "products",
-    "sku_mappings",
-    "sku_mapping_products",
-    "movement_batches",
-    "movements",
-    "monthly_stock_counts",
-)
+TABLES = INVENTORY_TABLES
 SHARED_WORKSPACE_KEY = "bolsas-baby"
 TOKEN_REFRESH_SKEW_SECONDS = 90
 
 
 class CloudSyncError(RuntimeError):
     pass
+
+
+class LocalChangesPending(CloudSyncError):
+    """A local commit made the remote download decision obsolete."""
 
 
 def _response_error_message(detail: object, *, explicit_only: bool = False) -> str | None:
@@ -256,7 +253,18 @@ class CloudSync:
             self.settings.pop(key, None)
 
     def export_payload(self, connection: sqlite3.Connection) -> dict:
-        connection.commit()
+        # Read all tables from one SQLite snapshot. A concurrent movement must
+        # never produce half of a batch in the outgoing payload.
+        own_transaction = not connection.in_transaction
+        if own_transaction:
+            connection.execute("BEGIN")
+        try:
+            return self._export_payload(connection)
+        finally:
+            if own_transaction:
+                connection.rollback()  # End this read-only snapshot.
+
+    def _export_payload(self, connection: sqlite3.Connection) -> dict:
         tables = {}
         for table in TABLES:
             columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
@@ -295,7 +303,25 @@ class CloudSync:
         self.settings["cloud_last_fingerprint"] = self.payload_fingerprint(payload)
         self.settings["cloud_last_revision"] = int(snapshot.get("revision") or 1)
         self.settings["cloud_last_remote_updated_at"] = str(snapshot.get("updated_at") or "")
-        self.settings.pop("cloud_local_modified_at", None)
+
+    def _local_snapshot(self, connection: sqlite3.Connection) -> tuple[dict, int, bool]:
+        if connection.in_transaction:
+            raise CloudSyncError("Aguarde a gravação local antes de sincronizar.")
+        connection.execute("BEGIN")
+        try:
+            revision, synced_revision = get_sync_state(connection)
+            return self.export_payload(connection), revision, revision != synced_revision
+        finally:
+            connection.rollback()
+
+    def _finish_sync(self, connection: sqlite3.Connection, payload: dict, snapshot: dict, revision: int) -> bool:
+        with connection:
+            acknowledge_sync(connection, revision)
+        self._remember_sync(payload, snapshot)
+        pending = has_pending_sync(connection)
+        if not pending:
+            self.settings.pop("cloud_local_modified_at", None)
+        return pending
 
     def _upload_payload(self, payload: dict, revision: int) -> dict:
         snapshot = {
@@ -316,15 +342,17 @@ class CloudSync:
         return snapshot
 
     def upload(self, connection: sqlite3.Connection) -> dict:
-        payload = self.export_payload(connection)
+        payload, revision, _pending = self._local_snapshot(connection)
         remote = self.remote_snapshot()
-        return self._upload_payload(payload, int((remote or {}).get("revision") or 0) + 1)
+        snapshot = self._upload_payload(payload, int((remote or {}).get("revision") or 0) + 1)
+        self._finish_sync(connection, payload, snapshot, revision)
+        return snapshot
 
     def remote_snapshot(self) -> dict | None:
         result = self._request(f"/workspaces/{SHARED_WORKSPACE_KEY}.json", authenticated=True)
         return result if isinstance(result, dict) and result.get("payload") else None
 
-    def _download_snapshot(self, connection: sqlite3.Connection, snapshot: dict) -> str:
+    def _download_snapshot(self, connection: sqlite3.Connection, snapshot: dict, *, expected_revision: int | None = None) -> str:
         payload = snapshot["payload"]
         if payload.get("format") != 1:
             raise CloudSyncError("A cópia na nuvem usa um formato incompatível.")
@@ -362,14 +390,23 @@ class CloudSync:
         except (ValueError, TypeError, binascii.Error) as error:
             raise CloudSyncError("A cópia na nuvem contém fotos inválidas.") from error
         register_database_functions(connection)
-        backup = self.folder / f"antes-da-sincronizacao-{datetime.now():%Y%m%d-%H%M%S}.db"
-        connection.commit()
+        backup = self.folder / f"antes-da-sincronizacao-{datetime.now():%Y%m%d-%H%M%S-%f}.db"
+        if connection.in_transaction:
+            raise LocalChangesPending("Há uma gravação local em andamento.")
         backup_connection = sqlite3.connect(backup)
-        connection.backup(backup_connection)
-        backup_connection.close()
+        try:
+            connection.backup(backup_connection)
+        finally:
+            backup_connection.close()
         try:
             connection.execute("PRAGMA foreign_keys=OFF")
             with connection:
+                # Hold SQLite's writer lock only while importing, never during
+                # network I/O. Check again *inside* this transaction to close
+                # the race between receiving Firebase's reply and replacing rows.
+                connection.execute("BEGIN IMMEDIATE")
+                if expected_revision is not None and get_sync_state(connection)[0] != expected_revision:
+                    raise LocalChangesPending("Uma movimentação foi salva durante a sincronização.")
                 for table in reversed(TABLES):
                     connection.execute(f"DELETE FROM {table}")
                 for table in TABLES:
@@ -381,43 +418,56 @@ class CloudSync:
                         columns = list(values)
                         placeholders = ",".join("?" for _ in columns)
                         connection.execute(f"INSERT INTO {table} ({','.join(columns)}) VALUES ({placeholders})", tuple(values[c] for c in columns))
+                integrity_errors = database_integrity_errors(connection)
+                if integrity_errors:
+                    raise CloudSyncError(
+                        "A cópia na nuvem falhou na verificação de integridade: "
+                        + "; ".join(integrity_errors[:3])
+                    )
+                photos_folder = self.folder / "fotos"
+                photos_folder.mkdir(exist_ok=True)
+                for name, contents in decoded_photos.items():
+                    temporary_photo = photos_folder / f".{name}.{uuid.uuid4().hex}.tmp"
+                    temporary_photo.write_bytes(contents)
+                    temporary_photo.replace(photos_folder / name)
+                acknowledge_sync(connection, get_sync_state(connection)[0])
+        finally:
             connection.execute("PRAGMA foreign_keys=ON")
-            integrity_errors = database_integrity_errors(connection)
-            if integrity_errors:
-                raise CloudSyncError(
-                    "A cópia na nuvem falhou na verificação de integridade: "
-                    + "; ".join(integrity_errors[:3])
-                )
-            photos_folder = self.folder / "fotos"
-            photos_folder.mkdir(exist_ok=True)
-            for name, contents in decoded_photos.items():
-                temporary_photo = photos_folder / f".{name}.{uuid.uuid4().hex}.tmp"
-                temporary_photo.write_bytes(contents)
-                temporary_photo.replace(photos_folder / name)
-        except Exception:
-            connection.execute("PRAGMA foreign_keys=OFF")
-            backup_connection = sqlite3.connect(backup)
-            backup_connection.backup(connection)
-            backup_connection.close()
-            connection.execute("PRAGMA foreign_keys=ON")
-            raise
         self._remember_sync(payload, snapshot)
         return str(snapshot["updated_at"])
 
     def download(self, connection: sqlite3.Connection) -> str:
+        revision = get_sync_state(connection)[0]
         snapshot = self.remote_snapshot()
         if not snapshot:
             raise CloudSyncError("Ainda não existe uma cópia compartilhada no Firebase.")
-        return self._download_snapshot(connection, snapshot)
+        return self._download_snapshot(connection, snapshot, expected_revision=revision)
 
     def synchronize(self, connection: sqlite3.Connection, prefer_local: bool = False) -> dict:
         """Keep this device aligned with the single inventory shared by authenticated users."""
-        local_payload = self.export_payload(connection)
+        local_payload, local_revision, local_pending = self._local_snapshot(connection)
         local_fingerprint = self.payload_fingerprint(local_payload)
         remote = self.remote_snapshot()
+        # A request can take seconds. The UI remains usable during that time,
+        # so the snapshot used to make this decision may already be outdated.
+        if get_sync_state(connection)[0] != local_revision:
+            return {"action": "pending", "pending": True}
+
+        def upload_payload(revision: int) -> dict:
+            snapshot = self._upload_payload(local_payload, revision)
+            pending = self._finish_sync(connection, local_payload, snapshot, local_revision)
+            return {"action": "uploaded", "snapshot": snapshot, "pending": pending}
+
+        def download_snapshot() -> dict:
+            try:
+                updated_at = self._download_snapshot(connection, remote, expected_revision=local_revision)
+            except LocalChangesPending:
+                return {"action": "pending", "pending": True}
+            return {"action": "downloaded", "updated_at": updated_at, "snapshot": remote,
+                    "pending": has_pending_sync(connection)}
+
         if remote is None:
-            snapshot = self._upload_payload(local_payload, 1)
-            return {"action": "uploaded", "snapshot": snapshot}
+            return upload_payload(1)
 
         remote_payload = remote.get("payload") or {}
         if remote_payload.get("format") != 1:
@@ -427,26 +477,20 @@ class CloudSync:
         remote_revision = int(remote.get("revision") or 1)
 
         if local_fingerprint == remote_fingerprint:
-            self._remember_sync(remote_payload, remote)
-            return {"action": "unchanged", "snapshot": remote}
-        if prefer_local and self.payload_has_user_data(local_payload):
-            snapshot = self._upload_payload(local_payload, remote_revision + 1)
-            return {"action": "uploaded", "snapshot": snapshot}
+            pending = self._finish_sync(connection, remote_payload, remote, local_revision)
+            return {"action": "unchanged", "snapshot": remote, "pending": pending}
+        if local_pending or (prefer_local and self.payload_has_user_data(local_payload)):
+            return upload_payload(remote_revision + 1)
         if not self.payload_has_user_data(local_payload) and self.payload_has_user_data(remote_payload):
-            updated_at = self._download_snapshot(connection, remote)
-            return {"action": "downloaded", "updated_at": updated_at, "snapshot": remote}
+            return download_snapshot()
         if last_fingerprint:
             if local_fingerprint == last_fingerprint:
-                updated_at = self._download_snapshot(connection, remote)
-                return {"action": "downloaded", "updated_at": updated_at, "snapshot": remote}
+                return download_snapshot()
             if remote_fingerprint == last_fingerprint:
-                snapshot = self._upload_payload(local_payload, remote_revision + 1)
-                return {"action": "uploaded", "snapshot": snapshot}
+                return upload_payload(remote_revision + 1)
 
         local_modified = str(self.settings.get("cloud_local_modified_at") or "")
         remote_modified = str(remote.get("updated_at") or "")
         if remote_modified and (not local_modified or remote_modified >= local_modified):
-            updated_at = self._download_snapshot(connection, remote)
-            return {"action": "downloaded", "updated_at": updated_at, "snapshot": remote}
-        snapshot = self._upload_payload(local_payload, remote_revision + 1)
-        return {"action": "uploaded", "snapshot": snapshot}
+            return download_snapshot()
+        return upload_payload(remote_revision + 1)

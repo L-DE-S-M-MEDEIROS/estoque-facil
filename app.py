@@ -29,13 +29,13 @@ from xml.sax.saxutils import escape as xml_escape
 from premium_icons import app_icon, application_icon_path, brand_mark, icon
 from premium_widgets import MaskedDateEntry, SmoothScrollableFrame, TreeConfidenceOverlay, TreeRelativeDateOverlay, TreeRowSeparatorOverlay, TreeStockOverlay, confidence_tier, tree_wheel_units
 from cloud_sync import CloudSync, CloudSyncError
-from database_utils import configure_database_connection, database_integrity_errors, normalize_identity_text
+from database_utils import configure_database_connection, database_integrity_errors, has_pending_sync, initialize_sync_tracking, normalize_identity_text
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
 from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.16"
+APP_VERSION = "1.2.17"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1eXMlyvFpO_-MkD8oaux1NrlupqR-ECNyEZS1XSgJIiY/edit?usp=sharing"
 SEARCH_RESULT_LIMIT = 18
@@ -767,6 +767,7 @@ class Database:
         ) WHERE operation_id IS NULL""")
         self.db.execute("""UPDATE OR IGNORE operation_types SET name='Desmontagem de kits'
             WHERE legacy_type='kit_disassembly' AND name<>'Desmontagem de kits'""")
+        initialize_sync_tracking(self.db)
         self.db.commit()
         self.on_change = None
         self._products_cache: tuple[sqlite3.Row, ...] | None = None
@@ -2481,7 +2482,7 @@ class CloudLoginDialog(BrandedToplevel):
         if not credentials:return
         try:self.parent.cloud.sign_in(*credentials);self.parent.save_cloud_settings()
         except CloudSyncError as error:messagebox.showerror(APP_NAME,str(error),parent=self);return
-        self.destroy();self.parent.update_cloud_status();self.parent.start_cloud_sync(silent=False,prefer_local=True)
+        self.destroy();self.parent.update_cloud_status();self.parent.start_cloud_sync(silent=False)
 
     def sign_up(self):
         credentials=self.credentials()
@@ -2489,7 +2490,7 @@ class CloudLoginDialog(BrandedToplevel):
         try:signed_in=self.parent.cloud.sign_up(*credentials);self.parent.save_cloud_settings()
         except CloudSyncError as error:messagebox.showerror(APP_NAME,str(error),parent=self);return
         if signed_in:
-            self.destroy();self.parent.update_cloud_status();self.parent.start_cloud_sync(silent=False,prefer_local=True)
+            self.destroy();self.parent.update_cloud_status();self.parent.start_cloud_sync(silent=False)
         else:
             messagebox.showinfo(APP_NAME,"Conta criada. Confirme o e-mail recebido e depois use o botão Entrar.",parent=self)
 
@@ -2521,7 +2522,9 @@ class EstoqueApp(ctk.CTk):
         self._ui_jobs: dict[str, str] = {}
         self.update_events: queue.Queue = queue.Queue(); self.update_busy = False; self.update_button = None
         self.cloud_events: queue.Queue = queue.Queue(); self.cloud_sync_busy = False; self.cloud_sync_pending = False; self.cloud_sync_timer = None
+        self.cloud_retry_timer = None; self.cloud_sync_error = ""; self.cloud_sync_confirmed = False
         self.nav_buttons = {}; self.pages = {}; self.current_page = ""; self.build_shell(); self.show_page(self.settings.get("last_page", "stock"))
+        self.update_cloud_status()
         self.bind("<Configure>", self.remember_window_geometry)
         self.after_idle(self.restore_window)
         self.after(2500, lambda: self.check_updates(silent=True))
@@ -4015,53 +4018,99 @@ class EstoqueApp(ctk.CTk):
         return page
 
     def update_cloud_status(self):
-        if hasattr(self,"cloud_status"):
-            self.cloud_status.set(f"Conectado como {self.cloud.email} — estoque compartilhado e automático" if self.cloud.signed_in else "Desconectado — entre ou crie sua conta segura")
+        pending = has_pending_sync(self.db.db)
+        if not self.cloud.signed_in:
+            summary = "Salvo neste computador" if pending else "Sem conexão com a conta"
+            detail = "Entre na conta para sincronizar o estoque."
+        elif self.cloud_sync_busy:
+            summary = "Salvo localmente • sincronizando" if pending else "Sincronizando estoque"
+            detail = f"Conectado como {self.cloud.email} — {summary.lower()}."
+        elif self.cloud_sync_error:
+            summary = "Salvo localmente • envio pendente" if pending else "Conexão indisponível"
+            detail = f"{summary}. Nova tentativa automática. {self.cloud_sync_error}"
+        elif pending:
+            summary = "Salvo localmente • envio pendente"
+            detail = f"Conectado como {self.cloud.email} — dados salvos neste computador; aguardando envio."
+        elif self.cloud_sync_confirmed:
+            summary = "Estoque sincronizado"
+            detail = f"Conectado como {self.cloud.email} — última sincronização concluída."
+        else:
+            summary = "Verificando sincronização"
+            detail = f"Conectado como {self.cloud.email} — verificando o estoque compartilhado."
+        if hasattr(self,"cloud_status"):self.cloud_status.set(detail)
+        if hasattr(self,"sidebar_status"):
+            self.sidebar_status.configure(text=f"• {summary}\n    Versão {APP_VERSION}")
 
     def cloud_account(self):
+        if self.cloud_sync_busy:
+            messagebox.showinfo(APP_NAME,"A sincronização está em andamento. Aguarde sua conclusão para trocar de conta.",parent=self);return
         if self.cloud.signed_in:
             if messagebox.askyesno(APP_NAME,f"Sair da conta {self.cloud.email}?",parent=self):
                 self.cloud.sign_out();self.save_cloud_settings();self.update_cloud_status()
         else:CloudLoginDialog(self)
 
     def cloud_upload(self):
+        if self.cloud_sync_busy:
+            messagebox.showinfo(APP_NAME,"A sincronização já está em andamento. Os dados novos continuam salvos neste computador.",parent=self);return
         if not self.cloud.signed_in:CloudLoginDialog(self);return
         if not messagebox.askyesno(APP_NAME,"Enviar agora os produtos, movimentações, cadastros, vínculos de SKU e fotos para o estoque compartilhado no Firebase?",parent=self):return
-        try:self.cloud.upload(self.db.db);self.save_cloud_settings()
-        except CloudSyncError as error:messagebox.showerror(APP_NAME,str(error),parent=self);return
-        messagebox.showinfo(APP_NAME,"Dados enviados e protegidos no Firebase.",parent=self)
+        self.start_cloud_sync(silent=False,operation="upload")
 
     def cloud_download(self):
+        if self.cloud_sync_busy:
+            messagebox.showinfo(APP_NAME,"A sincronização já está em andamento. Aguarde sua conclusão antes de baixar os dados.",parent=self);return
         if not self.cloud.signed_in:CloudLoginDialog(self);return
+        if has_pending_sync(self.db.db):
+            messagebox.showinfo(APP_NAME,"Há alterações salvas neste computador aguardando envio. Sincronize-as antes de baixar outra cópia para preservar suas movimentações.",parent=self)
+            self.schedule_cloud_sync();return
         if not messagebox.askyesno(APP_NAME,"Baixar a cópia do Firebase e substituir os dados locais?\n\nUm backup local de segurança será criado automaticamente.",icon="warning",parent=self):return
-        try:updated_at=self.cloud.download(self.db.db);self.save_cloud_settings()
-        except (CloudSyncError,KeyError,ValueError,sqlite3.Error,OSError) as error:messagebox.showerror(APP_NAME,f"Não foi possível baixar os dados.\n\n{error}",parent=self);return
-        self.refresh_all();messagebox.showinfo(APP_NAME,f"Dados restaurados da nuvem.\nCópia remota: {updated_at[:19].replace('T',' ')}",parent=self)
+        self.start_cloud_sync(silent=False,operation="download")
 
     def schedule_cloud_sync(self):
         if not hasattr(self,"cloud") or not self.cloud.signed_in:return
         self.cloud_settings["cloud_local_modified_at"]=datetime.now(timezone.utc).isoformat()
-        if getattr(self,"cloud_sync_timer",None) is not None:
-            try:self.after_cancel(self.cloud_sync_timer)
-            except (tk.TclError,ValueError):pass
-        # Uma movimentação local deve ser enviada logo após o commit. O
-        # sincronizador roda em thread, então este atraso curto não bloqueia a
-        # interface e evita que uma leitura remota sobrescreva a baixa local.
-        self.cloud_sync_timer=self.after(250,lambda:self.start_cloud_sync(silent=True,prefer_local=True))
+        self.cloud_sync_pending=True
+        if self.cloud_retry_timer is not None:
+            self.after_cancel(self.cloud_retry_timer);self.cloud_retry_timer=None
+        # SQLite invokes this callback before executing each write. Run once on
+        # the root event loop after the transaction commits, regardless of page.
+        if not self.cloud_sync_busy and self.cloud_sync_timer is None:
+            self.cloud_sync_timer=self.after(0,self.run_scheduled_cloud_sync)
 
-    def start_cloud_sync(self,silent=True,prefer_local=False):
+    def run_scheduled_cloud_sync(self):
+        self.cloud_sync_timer=None
+        self.start_cloud_sync(silent=True)
+
+    def retry_cloud_sync(self):
+        self.cloud_retry_timer=None
+        self.start_cloud_sync(silent=True)
+
+    def start_cloud_sync(self,silent=True,prefer_local=None,operation="sync"):
         if not self.cloud.signed_in:return
         if self.cloud_sync_busy:
             self.cloud_sync_pending=True;return
-        self.cloud_sync_busy=True;self.cloud_sync_pending=False;self.cloud_sync_timer=None
-        if hasattr(self,"cloud_status"):self.cloud_status.set(f"Conectado como {self.cloud.email} — sincronizando...")
+        if self.cloud_sync_timer is not None:
+            self.after_cancel(self.cloud_sync_timer);self.cloud_sync_timer=None
+        if self.cloud_retry_timer is not None:
+            self.after_cancel(self.cloud_retry_timer);self.cloud_retry_timer=None
+        if prefer_local is None:prefer_local=has_pending_sync(self.db.db)
+        self.cloud_sync_busy=True;self.cloud_sync_pending=False;self.cloud_sync_error=""
+        self.update_cloud_status()
         def worker():
-            connection=sqlite3.connect(self.db.path,timeout=5)
-            configure_database_connection(connection)
-            try:self.cloud_events.put(("success",self.cloud.synchronize(connection,prefer_local),silent))
+            connection=None
+            try:
+                connection=sqlite3.connect(self.db.path,timeout=5)
+                configure_database_connection(connection)
+                if operation=="upload":
+                    result={"action":"uploaded","snapshot":self.cloud.upload(connection)}
+                elif operation=="download":
+                    result={"action":"downloaded","updated_at":self.cloud.download(connection)}
+                else:result=self.cloud.synchronize(connection,prefer_local)
+                self.cloud_events.put(("success",result,silent))
             except CloudSyncError as error:self.cloud_events.put(("error",str(error),silent))
-            except (KeyError,ValueError,sqlite3.Error,OSError) as error:self.cloud_events.put(("error",f"Não foi possível sincronizar: {error}",silent))
-            finally:connection.close()
+            except Exception as error:self.cloud_events.put(("error",f"Não foi possível sincronizar: {error}",silent))
+            finally:
+                if connection is not None:connection.close()
         threading.Thread(target=worker,daemon=True).start();self.after(120,self.poll_cloud_sync_events)
 
     def poll_cloud_sync_events(self):
@@ -4070,15 +4119,23 @@ class EstoqueApp(ctk.CTk):
             if self.cloud_sync_busy:self.after(120,self.poll_cloud_sync_events)
             return
         kind,result,silent=event
-        self.cloud_sync_busy=False;self.save_cloud_settings();self.update_cloud_status()
+        self.cloud_sync_busy=False;self.save_cloud_settings()
         if kind=="success":
             action=result.get("action")
+            self.cloud_sync_error="";self.cloud_sync_confirmed=True
             if action=="downloaded":self.refresh_all()
+            pending=self.cloud_sync_pending or has_pending_sync(self.db.db) or action=="pending" or result.get("pending",False)
             if not silent:
-                messages={"uploaded":"Dados locais enviados ao estoque compartilhado.","downloaded":"Este computador recebeu os dados mais recentes dos outros usuários.","unchanged":"Todos os usuários já estão sincronizados."}
-                messagebox.showinfo(APP_NAME,messages.get(action,"Sincronização concluída."),parent=self)
-        elif not silent:messagebox.showerror(APP_NAME,result,parent=self)
-        if self.cloud_sync_pending:self.after(100,lambda:self.start_cloud_sync(silent=True,prefer_local=True))
+                messages={"uploaded":"Dados locais enviados ao estoque compartilhado.","downloaded":"Este computador recebeu os dados mais recentes dos outros usuários.","unchanged":"Este computador está sincronizado."}
+                messagebox.showinfo(APP_NAME,"Dados salvos neste computador; concluindo o envio das alterações mais recentes." if pending else messages.get(action,"Sincronização concluída."),parent=self)
+            if pending and self.cloud_sync_timer is None:
+                self.cloud_sync_timer=self.after(0,self.run_scheduled_cloud_sync)
+        else:
+            self.cloud_sync_error=str(result)
+            if self.cloud.signed_in and self.cloud_retry_timer is None:
+                self.cloud_retry_timer=self.after(5000,self.retry_cloud_sync)
+            if not silent:messagebox.showerror(APP_NAME,result,parent=self)
+        self.update_cloud_status()
 
     def periodic_cloud_sync(self):
         if self.cloud.signed_in:self.start_cloud_sync(silent=True)
