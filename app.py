@@ -35,7 +35,7 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.17"
+APP_VERSION = "1.2.18"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1eXMlyvFpO_-MkD8oaux1NrlupqR-ECNyEZS1XSgJIiY/edit?usp=sharing"
 SEARCH_RESULT_LIMIT = 18
@@ -1659,14 +1659,27 @@ class Database:
             LEFT JOIN operation_types o ON o.id=m.operation_id
             WHERE m.batch_id=? ORDER BY m.created_at,m.id""", (batch_id,)).fetchall()
 
+    def history_products(self, search: str = "") -> list[sqlite3.Row]:
+        """Offer products with ledger entries, including older movements."""
+        rows = self.db.execute("""SELECT p.* FROM products p
+            WHERE EXISTS (SELECT 1 FROM movements m WHERE m.product_id=p.id)
+            ORDER BY p.group_name COLLATE NOCASE,p.name COLLATE NOCASE,p.variant COLLATE NOCASE,p.id""").fetchall()
+        return [row for row in rows if product_matches_search(row, search)] if search.strip() else rows
+
     def movement_history(
         self,
         operation: int | str = "todos",
         start_date: str | None = None,
         end_date: str | None = None,
+        product_id: int | None = None,
     ) -> list[dict]:
         batch_conditions, batch_args = [], []
         legacy_conditions, legacy_args = ["m.batch_id IS NULL"], []
+        if product_id is not None:
+            # Filter the batch, not its joined items: details/counts stay intact.
+            batch_conditions.append("EXISTS (SELECT 1 FROM movements selected WHERE selected.batch_id=mb.id AND selected.product_id=?)")
+            batch_args.append(int(product_id))
+            legacy_conditions.append("m.product_id=?"); legacy_args.append(int(product_id))
         if operation != "todos":
             operation_id = int(operation)
             batch_conditions.append("mb.operation_id=?"); batch_args.append(operation_id)
@@ -1701,7 +1714,7 @@ class Database:
             item["history_key"] = f"batch:{item['batch_id']}" if item["batch_id"] else f"movement:{item['movement_id']}"
             history.append(item)
         history.sort(key=lambda item: (item["movement_date"], item["created_at"]), reverse=True)
-        return history[:500]
+        return history if product_id is not None else history[:500]
 
     def update_movement_batch(self, batch_id: int, operation: int | str, items: list[tuple[int, float]], movement_date: str, reason: str, performed_by: str) -> None:
         batch = self.movement_batch(batch_id)
@@ -3681,6 +3694,20 @@ class EstoqueApp(ctk.CTk):
         self.history_period_status=ctk.CTkLabel(date_filters,text="",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10))
         self.history_period_status.pack(side="left",padx=(14,0))
         self.update_history_period_status()
+        product_filters = ctk.CTkFrame(history, fg_color="transparent")
+        product_filters.pack(fill="x", padx=20, pady=(0,12))
+        ctk.CTkLabel(product_filters, text="Filtrar por produto", text_color=COLORS["text"], font=ctk.CTkFont("Inter",11,"bold")).pack(side="left",padx=(0,12))
+        self.history_product_id = None
+        self.history_product_query = tk.StringVar()
+        self.history_product_entry = ctk.CTkEntry(product_filters, textvariable=self.history_product_query, height=38, corner_radius=9, border_width=1, border_color=COLORS["border"], placeholder_text="Digite grupo, produto ou variação...")
+        self.history_product_entry.pack(side="left",fill="x",expand=True)
+        self.history_product_entry.bind("<KeyRelease>", self.search_history_products)
+        self.history_product_entry.bind("<Button-1>", lambda _event:self.search_history_products())
+        self.history_product_entry.bind("<Escape>", lambda _event:self.history_product_suggestions.pack_forget())
+        ctk.CTkButton(product_filters,text="Limpar produto",width=125,height=38,corner_radius=9,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.clear_history_product_filter).pack(side="left",padx=(10,0))
+        self.history_product_suggestions = SmoothScrollableFrame(history,height=110,corner_radius=9,fg_color=COLORS["surface_alt"],border_width=1,border_color=COLORS["border"],scrollbar_button_color=COLORS["accent"])
+        self.history_product_status = ctk.CTkLabel(history,text="Todos os produtos",anchor="w",text_color=COLORS["muted"],font=ctk.CTkFont("Inter",10))
+        self.history_product_status.pack(fill="x",padx=20,pady=(0,8))
         self.history_tree = self.table(history, ("date", "operation", "items", "products", "user", "reason"), ("Data", "Operação", "Itens", "Produtos do conjunto", "Usuário", "Observação"), (85, 130, 70, 390, 135, 220))
         self.history_tree.column("products", anchor="w")
         self.history_tree.column("reason", anchor="w")
@@ -3972,6 +3999,36 @@ class EstoqueApp(ctk.CTk):
         self.history_date_range=(None,None)
         self.update_history_period_status();self.refresh_movements();self.save_interface_state()
 
+    def search_history_products(self, event=None):
+        if event is not None and event.keysym == "Escape":return
+        self.schedule_ui_task("history_product_search",self.render_history_product_suggestions,120)
+
+    def render_history_product_suggestions(self):
+        query = self.history_product_query.get().strip()
+        for widget in self.history_product_suggestions.winfo_children():widget.destroy()
+        matches = self.db.history_products(query)
+        self.history_product_suggestions.pack(fill="x",padx=20,pady=(0,10),before=self.history_product_status)
+        for product in matches[:40]:
+            label = product_label(product)
+            ctk.CTkButton(self.history_product_suggestions,text=label,anchor="w",height=32,fg_color="transparent",hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=lambda pid=int(product["id"]),name=label:self.select_history_product(pid,name)).pack(fill="x",padx=4,pady=1)
+        if not matches or len(matches)>40:
+            text = "Nenhum produto encontrado no histórico." if not matches else "Digite mais detalhes para refinar os resultados."
+            ctk.CTkLabel(self.history_product_suggestions,text=text,text_color=COLORS["muted"]).pack(anchor="w",padx=8)
+
+    def select_history_product(self, product_id, label):
+        self.cancel_ui_task("history_product_search")
+        self.history_product_id=product_id
+        self.history_product_query.set(label)
+        self.history_product_suggestions.pack_forget()
+        self.refresh_movements()
+
+    def clear_history_product_filter(self):
+        self.cancel_ui_task("history_product_search")
+        self.history_product_id=None
+        self.history_product_query.set("")
+        self.history_product_suggestions.pack_forget()
+        self.refresh_movements()
+
     def refresh_movements(self):
         if not hasattr(self,"history_tree"):return
         self.refresh_user_controls()
@@ -3981,7 +4038,13 @@ class EstoqueApp(ctk.CTk):
         self.history_tree.delete(*self.history_tree.get_children())
         operation_filter=getattr(self,"history_operation_mapping",{}).get(self.history_filter.get(),"todos")
         history_start,history_end=getattr(self,"history_date_range",(None,None))
-        for movement in self.db.movement_history(operation_filter,history_start.isoformat() if history_start else None,history_end.isoformat() if history_end else None):
+        product_id=getattr(self,"history_product_id",None)
+        movements=self.db.movement_history(operation_filter,history_start.isoformat() if history_start else None,history_end.isoformat() if history_end else None,product_id=product_id)
+        if hasattr(self,"history_product_status"):
+            product=self.db.product(product_id) if product_id is not None else None
+            scope=f"Produto: {product_label(product)}" if product else "Todos os produtos"
+            self.history_product_status.configure(text=f"{scope} • {len(movements)} movimentações encontradas" if movements else f"{scope} • Nenhuma movimentação encontrada para os filtros selecionados.")
+        for movement in movements:
             item_count=int(movement["item_count"]);item_label=f"{item_count} {'produto' if item_count==1 else 'produtos'}"
             self.history_tree.insert("","end",iid=movement["history_key"],values=(datetime.strptime(movement["movement_date"],"%Y-%m-%d").strftime("%d/%m/%y"),movement["operation_name"],item_label,movement["product_summary"],movement["checked_by"]or"—",movement["reason"]or"Sem observação"))
 
