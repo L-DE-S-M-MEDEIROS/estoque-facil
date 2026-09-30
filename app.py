@@ -31,11 +31,12 @@ from premium_widgets import MaskedDateEntry, SmoothScrollableFrame, TreeConfiden
 from cloud_sync import CloudSync, CloudSyncError
 from database_utils import configure_database_connection, database_integrity_errors, has_pending_sync, initialize_sync_tracking, normalize_identity_text
 from local_state import LocalCloudSession, LocalPreferences, LocalSimulationDraft, read_json_object
+from stock_print_selection import StockPrintSelection
 from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.18"
+APP_VERSION = "1.2.19"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1eXMlyvFpO_-MkD8oaux1NrlupqR-ECNyEZS1XSgJIiY/edit?usp=sharing"
 SEARCH_RESULT_LIMIT = 18
@@ -1861,6 +1862,80 @@ class BrandedToplevel(ctk.CTkToplevel):
         apply_window_icon(self)
 
 
+class StockPrintSelectionDialog(BrandedToplevel):
+    """Choose individual products or complete groups before creating a PDF."""
+
+    def __init__(self, parent, products):
+        super().__init__(parent, fg_color=COLORS["background"])
+        self.result = None
+        self.selection = StockPrintSelection(products)
+        self.product_vars, self.group_vars, self.group_labels = {}, {}, {}
+        self.title("Selecionar produtos para contagem")
+        geometry = centered_dialog_geometry(parent, 800, 650)
+        fitted = parse_window_geometry(geometry)
+        self.geometry(geometry)
+        self.minsize(min(600,fitted[0]),min(400,fitted[1]))
+        self.transient(parent); self.grab_set()
+        self.grid_columnconfigure(0,weight=1); self.grid_rowconfigure(1,weight=1)
+        self.bind("<Escape>",lambda _event:self.destroy())
+
+        header=ctk.CTkFrame(self,fg_color="transparent")
+        header.grid(row=0,column=0,sticky="ew",padx=24,pady=(20,12))
+        ctk.CTkLabel(header,text="O que você vai contar?",font=ctk.CTkFont("Inter",21,"bold"),text_color=COLORS["text"]).pack(anchor="w")
+        ctk.CTkLabel(header,text="Marque os produtos ou selecione um grupo inteiro. Só os marcados vão para o PDF.",wraplength=550,justify="left",text_color=COLORS["muted"]).pack(anchor="w",pady=(4,12))
+        actions=ctk.CTkFrame(header,fg_color="transparent");actions.pack(fill="x")
+        self.all_button=ctk.CTkButton(actions,text="Selecionar tudo",width=145,height=36,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=lambda:self.set_all(True))
+        self.all_button.pack(side="left")
+        ctk.CTkButton(actions,text="Limpar seleção",width=140,height=36,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=lambda:self.set_all(False)).pack(side="left",padx=10)
+
+        self.listing=SmoothScrollableFrame(self,fg_color="transparent",corner_radius=0,scrollbar_button_color=COLORS["accent"])
+        self.listing.grid(row=1,column=0,sticky="nsew",padx=20,pady=(0,12))
+        cards={}
+        for group in self.selection.groups:
+            card=Card(self.listing);card.pack(fill="x",padx=4,pady=(0,12));cards[group]=card
+            bar=ctk.CTkFrame(card,fg_color=COLORS["surface_alt"],corner_radius=9);bar.pack(fill="x",padx=10,pady=10)
+            variable=tk.BooleanVar(value=False);self.group_vars[group]=variable
+            label=ctk.CTkCheckBox(bar,text=group or "Sem grupo",variable=variable,font=ctk.CTkFont("Inter",13,"bold"),text_color=COLORS["text"],fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=lambda g=group:self.set_group(g))
+            label.pack(side="left",padx=12,pady=12)
+            status=ctk.CTkLabel(bar,text="",text_color=COLORS["muted"]);status.pack(side="right",padx=12)
+            self.group_labels[group]=status
+        for product in self.selection.products:
+            product_id=int(product["id"]);group=str(product["group_name"] or "").strip()
+            variable=tk.BooleanVar(value=False);self.product_vars[product_id]=variable
+            name=str(product["name"])+(f" • {product['variant']}" if product["variant"] else "")
+            ctk.CTkCheckBox(cards[group],text=name,variable=variable,text_color=COLORS["text"],fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=lambda pid=product_id:self.set_product(pid)).pack(anchor="w",fill="x",padx=24,pady=(2,12))
+
+        footer=ctk.CTkFrame(self,fg_color="transparent");footer.grid(row=2,column=0,sticky="ew",padx=24,pady=(0,20))
+        self.total_label=ctk.CTkLabel(footer,text="",text_color=COLORS["muted"]);self.total_label.pack(anchor="w",pady=(0,8))
+        ctk.CTkButton(footer,text="Cancelar",width=110,height=40,fg_color=COLORS["surface_alt"],hover_color=COLORS["surface_hover"],text_color=COLORS["text"],command=self.destroy).pack(side="left")
+        self.print_button=ctk.CTkButton(footer,text="Gerar lista para impressão",width=225,height=40,fg_color=COLORS["accent"],hover_color=COLORS["accent_hover"],command=self.confirm)
+        self.print_button.pack(side="right")
+        self.refresh_selection()
+        self.after(40,lambda:center_native_window(self,parent))
+
+    def refresh_selection(self):
+        for pid,variable in self.product_vars.items():variable.set(pid in self.selection.selected)
+        for group,variable in self.group_vars.items():
+            count=self.selection.group_count(group);total=len(self.selection.groups[group])
+            variable.set(count==total)
+            self.group_labels[group].configure(text=f"{count}/{total} selecionados")
+        self.total_label.configure(text=f"{len(self.selection.selected)} de {len(self.selection.ids)} produtos selecionados")
+        self.print_button.configure(state="normal" if self.selection.selected else "disabled")
+
+    def set_product(self, product_id):
+        self.selection.set_product(product_id,self.product_vars[product_id].get());self.refresh_selection()
+
+    def set_group(self, group):
+        self.selection.set_group(group,self.group_vars[group].get());self.refresh_selection()
+
+    def set_all(self, selected):
+        self.selection.set_all(selected);self.refresh_selection()
+
+    def confirm(self):
+        if not self.selection.selected:return
+        self.result=set(self.selection.selected);self.destroy()
+
+
 class ProductDialog(BrandedToplevel):
     def __init__(self, parent: "EstoqueApp", product: sqlite3.Row | None = None):
         super().__init__(parent, fg_color=COLORS["background"])
@@ -2910,6 +2985,12 @@ class EstoqueApp(ctk.CTk):
     def print_current_stock(self):
         products=self.db.stock_products()
         if not products:messagebox.showinfo(APP_NAME,"Cadastre produtos antes de imprimir o estoque atual.",parent=self);return
+        dialog=StockPrintSelectionDialog(self,products)
+        self.wait_window(dialog)
+        if not dialog.result:return
+        # Re-read balances after the selection dialog, without modifying stock.
+        products=[product for product in StockPrintSelection(self.db.stock_products()).products if int(product["id"]) in dialog.result]
+        if not products:messagebox.showinfo(APP_NAME,"Os produtos selecionados não estão mais disponíveis. Selecione novamente.",parent=self);return
         output=data_dir()/"impressoes"/f"estoque-atual-conferencia-{datetime.now().strftime('%Y%m%d-%H%M%S')}.pdf"
         try:build_current_stock_print_pdf(output,products);os.startfile(str(output))
         except (OSError,ValueError) as error:messagebox.showerror(APP_NAME,f"Não foi possível abrir o estoque para impressão.\n\n{error}\n\nArquivo: {output}",parent=self)
