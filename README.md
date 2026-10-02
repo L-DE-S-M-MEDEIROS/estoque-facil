@@ -9,6 +9,9 @@ Na página **Configurações**, use o cartão **Firebase — estoque online comp
 - O SQLite local é apenas um cache operacional; o Firebase Realtime Database é a fonte central para operar em qualquer computador.
 - O banco exige autenticação e restringe o acesso ao e-mail autorizado; usuários anônimos permanecem bloqueados pelas regras do Firebase.
 - Ao entrar, ao alterar dados e a cada 20 segundos, o aplicativo compara a cópia local com a nuvem e atualiza os outros computadores.
+- As verificações sem alteração usam somente o ETag leve do Firebase; o histórico, as tabelas e as fotos só são baixados novamente quando o conteúdo remoto muda.
+- O cache remoto é descartado ao trocar de conta, ao sair, diante de erro de rede ou quando o Firebase não fornece ETag; nesses casos o fluxo completo e validado é usado como fallback.
+- O projeto usa Firebase Realtime Database (REST) para o estoque; não há consultas ao Cloud Firestore no aplicativo atual.
 - A senha não é armazenada; somente a sessão de acesso fica salva neste computador.
 - Antes de baixar e substituir os dados locais, o aplicativo cria um backup automático.
 - A aba **Movimentações** possui rolagem suave e isolada: listas e tabelas internas não arrastam a página ao mesmo tempo.

@@ -21,6 +21,7 @@ class SyncAppHarness:
     retry_cloud_sync = app.EstoqueApp.retry_cloud_sync
     start_cloud_sync = app.EstoqueApp.start_cloud_sync
     poll_cloud_sync_events = app.EstoqueApp.poll_cloud_sync_events
+    periodic_cloud_sync = app.EstoqueApp.periodic_cloud_sync
     schedule_ui_task = app.EstoqueApp.schedule_ui_task
     show_page = app.EstoqueApp.show_page
     cloud_download = app.EstoqueApp.cloud_download
@@ -185,6 +186,55 @@ class MovementSyncSchedulingTests(unittest.TestCase):
         self.gui.cloud_events.put(("success", {"action":"pending", "pending":True}, True))
         self.gui.poll_cloud_sync_events()
         self.assertIsNotNone(self.gui.cloud_sync_timer)
+
+    def test_periodic_poll_during_sync_does_not_create_extra_pending_send(self):
+        self.gui.cloud_sync_busy = True
+        self.gui.periodic_cloud_sync()
+        self.assertFalse(self.gui.cloud_sync_pending)
+        self.gui.cloud_events.put(("success", {"action":"unchanged"}, True))
+        self.gui.poll_cloud_sync_events()
+        self.assertIsNone(self.gui.cloud_sync_timer)
+        self.assertIsNone(self.gui.cloud_retry_timer)
+        self.assertEqual([delay for delay, _callback in self.gui.timers.values()], [20000])
+
+    def test_periodic_poll_preserves_scheduled_upload(self):
+        self.add_movement()
+        send_timer = self.gui.cloud_sync_timer
+        self.gui.start_cloud_sync = Mock()
+        self.gui.periodic_cloud_sync()
+        self.gui.start_cloud_sync.assert_not_called()
+        self.assertEqual(self.gui.cloud_sync_timer, send_timer)
+        self.assertEqual(self.gui.timers[send_timer][0], 0)
+        self.assertTrue(self.gui.cloud_sync_pending)
+        self.assertTrue(has_pending_sync(self.database.db))
+        self.assertEqual(sorted(delay for delay, _callback in self.gui.timers.values()), [0, 20000])
+
+    def test_periodic_poll_preserves_failed_connection_retry(self):
+        self.gui.cloud_sync_busy = True
+        self.gui.cloud_events.put(("error", "Sem internet", True))
+        self.gui.poll_cloud_sync_events()
+        retry_timer = self.gui.cloud_retry_timer
+        self.gui.start_cloud_sync = Mock()
+        self.gui.periodic_cloud_sync()
+        self.gui.start_cloud_sync.assert_not_called()
+        self.assertEqual(self.gui.cloud_retry_timer, retry_timer)
+        self.assertEqual(self.gui.timers[retry_timer][0], 5000)
+        self.assertFalse(self.gui.cloud_sync_pending)
+        self.assertIsNone(self.gui.cloud_sync_timer)
+        self.assertEqual(sorted(delay for delay, _callback in self.gui.timers.values()), [5000, 20000])
+
+    def test_periodic_poll_syncs_idle_signed_in_app(self):
+        self.gui.start_cloud_sync = Mock()
+        self.gui.periodic_cloud_sync()
+        self.gui.start_cloud_sync.assert_called_once_with(silent=True)
+        self.assertEqual([delay for delay, _callback in self.gui.timers.values()], [20000])
+
+    def test_periodic_poll_waits_while_signed_out(self):
+        self.gui.cloud.signed_in = False
+        self.gui.start_cloud_sync = Mock()
+        self.gui.periodic_cloud_sync()
+        self.gui.start_cloud_sync.assert_not_called()
+        self.assertEqual([delay for delay, _callback in self.gui.timers.values()], [20000])
 
 
 if __name__ == "__main__":

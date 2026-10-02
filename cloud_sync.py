@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import hashlib
 import json
 import sqlite3
@@ -59,6 +60,29 @@ class CloudSync:
         self.folder = folder
         self.settings = settings
         self.device_id = settings.setdefault("cloud_device_id", str(uuid.uuid4()))
+        self._remote_cache_scope: tuple[str, ...] | None = None
+        self._remote_cache_etag: str | None = None
+        self._remote_cache_snapshot: dict | None = None
+
+    def _remote_scope(self) -> tuple[str, ...]:
+        return (
+            FIREBASE_DATABASE_URL, SHARED_WORKSPACE_KEY,
+            str(self.settings.get("cloud_provider") or ""),
+            str(self.settings.get("cloud_user_id") or ""),
+        )
+
+    def _invalidate_remote_cache(self) -> None:
+        self._remote_cache_scope = None
+        self._remote_cache_etag = None
+        self._remote_cache_snapshot = None
+
+    def _cache_remote_snapshot(self, snapshot: dict, response_headers: dict) -> None:
+        self._invalidate_remote_cache()
+        etag = response_headers.get("etag")
+        if isinstance(etag, str) and etag.strip() and snapshot.get("payload"):
+            self._remote_cache_scope = self._remote_scope()
+            self._remote_cache_etag = etag
+            self._remote_cache_snapshot = copy.deepcopy(snapshot)
 
     @property
     def signed_in(self) -> bool:
@@ -110,7 +134,9 @@ class CloudSync:
                 "A sessão do Firebase expirou. Entre novamente em Configurações → Conta."
             ) from error
 
-    def _request(self, path: str, *, method="GET", body=None, authenticated=False, headers=None, retry=True):
+    def _request(self, path: str, *, method="GET", body=None, authenticated=False, headers=None, retry=True, response_headers=None):
+        if response_headers is not None:
+            response_headers.clear()
         request_headers = {"Content-Type": "application/json"}
         request_url = FIREBASE_DATABASE_URL + path
         if authenticated:
@@ -139,11 +165,17 @@ class CloudSync:
         request = urllib.request.Request(request_url, data=data, method=method, headers=request_headers)
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
+                if response_headers is not None:
+                    response_headers.update({
+                        str(key).lower(): value
+                        for key, value in getattr(response, "headers", {}).items()
+                    })
                 return self._read_response(response)
         except urllib.error.HTTPError as error:
+            self._invalidate_remote_cache()
             if error.code in (408, 425, 429, 500, 502, 503, 504) and retry:
                 time.sleep(0.75)
-                return self._request(path, method=method, body=body, authenticated=authenticated, headers=headers, retry=False)
+                return self._request(path, method=method, body=body, authenticated=authenticated, headers=headers, retry=False, response_headers=response_headers)
             try:
                 detail = json.loads(error.read().decode("utf-8"))
                 message = _response_error_message(detail)
@@ -164,7 +196,7 @@ class CloudSync:
                 # fresh token would only hide that configuration problem.
                 if token_rejected or not message:
                     self._refresh_or_reauthenticate()
-                    return self._request(path, method=method, body=body, authenticated=True, headers=headers, retry=False)
+                    return self._request(path, method=method, body=body, authenticated=True, headers=headers, retry=False, response_headers=response_headers)
             if authenticated and token_rejected:
                 self.sign_out()
                 raise CloudSyncError(
@@ -177,7 +209,11 @@ class CloudSync:
                 )
             raise CloudSyncError(message or f"O Firebase respondeu com erro {error.code}.") from error
         except (urllib.error.URLError, TimeoutError) as error:
+            self._invalidate_remote_cache()
             raise CloudSyncError("Não foi possível conectar ao Firebase. Verifique a internet.") from error
+        except CloudSyncError:
+            self._invalidate_remote_cache()
+            raise
 
     def _auth_request(self, endpoint: str, body: dict, *, form=False) -> dict:
         headers = {"Content-Type": "application/x-www-form-urlencoded" if form else "application/json"}
@@ -212,6 +248,7 @@ class CloudSync:
             raise CloudSyncError("Não foi possível conectar ao Firebase. Verifique a internet.") from error
 
     def sign_in(self, email: str, password: str) -> None:
+        self._invalidate_remote_cache()
         result = self._auth_request(
             f"{FIREBASE_IDENTITY_URL}/accounts:signInWithPassword?key={FIREBASE_API_KEY}",
             {"email": email, "password": password, "returnSecureToken": True},
@@ -219,6 +256,7 @@ class CloudSync:
         self._store_session(result, email)
 
     def sign_up(self, email: str, password: str) -> bool:
+        self._invalidate_remote_cache()
         result = self._auth_request(
             f"{FIREBASE_IDENTITY_URL}/accounts:signUp?key={FIREBASE_API_KEY}",
             {"email": email, "password": password, "returnSecureToken": True},
@@ -235,6 +273,7 @@ class CloudSync:
         self._store_session(result, self.email)
 
     def _store_session(self, result: dict, email: str) -> None:
+        previous_scope = self._remote_scope()
         access_token = result.get("idToken") or result.get("id_token")
         refresh_token = result.get("refreshToken") or result.get("refresh_token")
         user_id = result.get("localId") or result.get("user_id")
@@ -247,8 +286,11 @@ class CloudSync:
             "cloud_user_id": user_id,
             "cloud_email": email.strip().lower(),
         })
+        if self._remote_scope() != previous_scope:
+            self._invalidate_remote_cache()
 
     def sign_out(self) -> None:
+        self._invalidate_remote_cache()
         for key in ("cloud_provider", "cloud_access_token", "cloud_refresh_token", "cloud_user_id", "cloud_email"):
             self.settings.pop(key, None)
 
@@ -331,28 +373,66 @@ class CloudSync:
             "updated_by": self.settings["cloud_user_id"],
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-        result = self._request(
-            f"/workspaces/{SHARED_WORKSPACE_KEY}.json",
-            method="PUT",
-            body=snapshot,
-            authenticated=True,
-        )
+        response_headers: dict[str, str] = {}
+        try:
+            result = self._request(
+                f"/workspaces/{SHARED_WORKSPACE_KEY}.json?print=silent",
+                method="PUT",
+                body=snapshot,
+                authenticated=True,
+                headers={"X-Firebase-ETag": "true"},
+                response_headers=response_headers,
+            )
+        except Exception:
+            self._invalidate_remote_cache()
+            raise
         snapshot = result if isinstance(result, dict) else snapshot
+        self._cache_remote_snapshot(snapshot, response_headers)
         self._remember_sync(payload, snapshot)
         return snapshot
 
     def upload(self, connection: sqlite3.Connection) -> dict:
         payload, revision, _pending = self._local_snapshot(connection)
-        remote = self.remote_snapshot()
-        snapshot = self._upload_payload(payload, int((remote or {}).get("revision") or 0) + 1)
+        remote_revision = self._request(
+            f"/workspaces/{SHARED_WORKSPACE_KEY}/revision.json", authenticated=True
+        )
+        snapshot = self._upload_payload(payload, int(remote_revision or 0) + 1)
         self._finish_sync(connection, payload, snapshot, revision)
         return snapshot
 
     def remote_snapshot(self) -> dict | None:
-        result = self._request(f"/workspaces/{SHARED_WORKSPACE_KEY}.json", authenticated=True)
-        return result if isinstance(result, dict) and result.get("payload") else None
+        if self._remote_cache_scope != self._remote_scope():
+            self._invalidate_remote_cache()
+        path = f"/workspaces/{SHARED_WORKSPACE_KEY}.json"
+        response_headers: dict[str, str] = {}
+        try:
+            if self._remote_cache_snapshot is not None and self._remote_cache_etag:
+                self._request(
+                    path + "?print=silent", authenticated=True,
+                    headers={"X-Firebase-ETag": "true"},
+                    response_headers=response_headers,
+                )
+                if (self._remote_cache_scope == self._remote_scope()
+                        and response_headers.get("etag") == self._remote_cache_etag
+                        and self._remote_cache_snapshot is not None):
+                    return copy.deepcopy(self._remote_cache_snapshot)
+                self._invalidate_remote_cache()
+            result = self._request(
+                path, authenticated=True, headers={"X-Firebase-ETag": "true"},
+                response_headers=response_headers,
+            )
+            if isinstance(result, dict) and result.get("payload"):
+                self._cache_remote_snapshot(result, response_headers)
+                return result
+            self._invalidate_remote_cache()
+            return None
+        except Exception:
+            self._invalidate_remote_cache()
+            raise
 
     def _download_snapshot(self, connection: sqlite3.Connection, snapshot: dict, *, expected_revision: int | None = None) -> str:
+        # Imported or rejected data must be read afresh before it can be reused.
+        self._invalidate_remote_cache()
         payload = snapshot["payload"]
         if payload.get("format") != 1:
             raise CloudSyncError("A cópia na nuvem usa um formato incompatível.")
@@ -441,7 +521,11 @@ class CloudSync:
         snapshot = self.remote_snapshot()
         if not snapshot:
             raise CloudSyncError("Ainda não existe uma cópia compartilhada no Firebase.")
-        return self._download_snapshot(connection, snapshot, expected_revision=revision)
+        try:
+            return self._download_snapshot(connection, snapshot, expected_revision=revision)
+        except Exception:
+            self._invalidate_remote_cache()
+            raise
 
     def synchronize(self, connection: sqlite3.Connection, prefer_local: bool = False) -> dict:
         """Keep this device aligned with the single inventory shared by authenticated users."""
@@ -463,6 +547,9 @@ class CloudSync:
                 updated_at = self._download_snapshot(connection, remote, expected_revision=local_revision)
             except LocalChangesPending:
                 return {"action": "pending", "pending": True}
+            except Exception:
+                self._invalidate_remote_cache()
+                raise
             return {"action": "downloaded", "updated_at": updated_at, "snapshot": remote,
                     "pending": has_pending_sync(connection)}
 
@@ -471,6 +558,7 @@ class CloudSync:
 
         remote_payload = remote.get("payload") or {}
         if remote_payload.get("format") != 1:
+            self._invalidate_remote_cache()
             raise CloudSyncError("A cópia compartilhada usa um formato incompatível.")
         remote_fingerprint = self.payload_fingerprint(remote_payload)
         last_fingerprint = str(self.settings.get("cloud_last_fingerprint") or "")

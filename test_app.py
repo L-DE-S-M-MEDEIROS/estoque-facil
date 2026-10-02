@@ -1046,7 +1046,7 @@ class SharedCloudSyncTests(unittest.TestCase):
             self.sync._upload_payload(payload, 3)
         path = request.call_args.args[0]
         body = request.call_args.kwargs["body"]
-        self.assertEqual(path, "/workspaces/bolsas-baby.json")
+        self.assertEqual(path, "/workspaces/bolsas-baby.json?print=silent")
         self.assertEqual(request.call_args.kwargs["method"], "PUT")
         self.assertTrue(request.call_args.kwargs["authenticated"])
         self.assertEqual(body["updated_by"], self.settings["cloud_user_id"])

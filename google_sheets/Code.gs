@@ -58,7 +58,7 @@ function atualizarEstoque(forcar) {
   if (!lock.tryLock(25000)) return 0;
   const properties = PropertiesService.getDocumentProperties();
   try {
-    const snapshot = buscarSnapshotFirebase_();
+    const snapshot = buscarSnapshotFirebase_(forcar === true);
     const updatedSheets = escreverEstoque_(snapshot, forcar === true);
     if (updatedSheets > 0) SpreadsheetApp.flush();
     properties.setProperty(ESTOQUE_CONFIG.propertyPrefix + 'ULTIMA_VERIFICACAO', new Date().toISOString());
@@ -81,14 +81,54 @@ function enviarContagem(event) {
   return;
 }
 
-function buscarSnapshotFirebase_() {
+function buscarSnapshotFirebase_(forcar) {
+  const today = Utilities.formatDate(new Date(), ESTOQUE_CONFIG.timeZone, 'yyyy-MM-dd');
+  const cacheKey = 'ESTOQUE_FIREBASE_1_' + assinaturaDados_('FIREBASE_CACHE_1', {
+    databaseUrl: ESTOQUE_CONFIG.firebaseDatabaseUrl,
+    workspace: ESTOQUE_CONFIG.firebaseWorkspace,
+    spreadsheetId: ESTOQUE_CONFIG.spreadsheetId,
+    timeZone: ESTOQUE_CONFIG.timeZone,
+    today: today,
+  });
+  let cache = null;
+  let cached = null;
+  try {
+    cache = CacheService.getScriptCache();
+    if (forcar !== true) cached = lerCacheFirebase_(cache, cacheKey);
+  } catch (error) {
+    // Cache é opcional: indisponibilidade nunca impede a leitura do Firebase.
+  }
   const url = ESTOQUE_CONFIG.firebaseDatabaseUrl + '/workspaces/'
     + encodeURIComponent(ESTOQUE_CONFIG.firebaseWorkspace) + '.json?access_token='
     + encodeURIComponent(ScriptApp.getOAuthToken());
-  const response = fetchComRetry_(url, {
+  const options = {
     method: 'get',
     muteHttpExceptions: true,
-  });
+    headers: { 'X-Firebase-ETag': 'true' },
+  };
+  if (cached) {
+    // print=silent devolve o ETag atual sem baixar novamente o workspace.
+    const validation = fetchComRetry_(url + '&print=silent', options);
+    lerRespostaFirebase_(validation);
+    const currentEtag = etagFirebase_(validation);
+    if (currentEtag && currentEtag === cached.etag) return cached.snapshot;
+  }
+  const response = fetchComRetry_(url, options);
+  const parsed = lerRespostaFirebase_(response);
+  if (!parsed || !parsed.payload || parsed.payload.format !== 1) {
+    throw new Error('O estoque online ainda não possui uma cópia válida.');
+  }
+  const projection = montarSnapshotPlanilha_(parsed.payload, today);
+  const snapshot = Object.assign({
+    ok: true,
+    revision: Number(parsed.revision || 1),
+    updated_at: String(parsed.updated_at || parsed.payload.exported_at || ''),
+  }, projection);
+  gravarCacheFirebase_(cache, cacheKey, etagFirebase_(response), snapshot);
+  return snapshot;
+}
+
+function lerRespostaFirebase_(response) {
   let parsed;
   try {
     parsed = JSON.parse(response.getContentText() || '{}');
@@ -100,17 +140,55 @@ function buscarSnapshotFirebase_() {
     throw new Error('Não foi possível consultar o Firebase (' + response.getResponseCode() + '): ' + detail
       + '. Execute configurarAutomacao novamente com a conta proprietária da planilha.');
   }
-  if (!parsed || !parsed.payload || parsed.payload.format !== 1) {
-    throw new Error('O estoque online ainda não possui uma cópia válida.');
+  return parsed;
+}
+
+function etagFirebase_(response) {
+  const headers = response.getAllHeaders();
+  const name = Object.keys(headers).find(function(key) { return key.toLowerCase() === 'etag'; });
+  const value = name ? headers[name] : '';
+  const normalized = Array.isArray(value) ? value[0] : value;
+  return typeof normalized === 'string' ? normalized.trim() : '';
+}
+
+function lerCacheFirebase_(cache, key) {
+  try {
+    const encoded = cache.get(key);
+    if (!encoded) return null;
+    const decoded = Utilities.ungzip(Utilities.newBlob(Utilities.base64Decode(encoded), 'application/x-gzip'));
+    const cached = JSON.parse(decoded.getDataAsString('UTF-8'));
+    if (!cached || typeof cached.etag !== 'string' || !cached.etag
+        || !cached.snapshot || cached.snapshot.ok !== true
+        || !Array.isArray(cached.snapshot.current) || !Array.isArray(cached.snapshot.months)
+        || cached.signature !== assinaturaDados_('FIREBASE_PROJECTION_1', cached.snapshot)) return null;
+    return cached;
+  } catch (error) {
+    return null;
   }
-  const projection = montarSnapshotPlanilha_(parsed.payload, Utilities.formatDate(
-    new Date(), ESTOQUE_CONFIG.timeZone, 'yyyy-MM-dd'
-  ));
-  return Object.assign({
-    ok: true,
-    revision: Number(parsed.revision || 1),
-    updated_at: String(parsed.updated_at || parsed.payload.exported_at || ''),
-  }, projection);
+}
+
+function gravarCacheFirebase_(cache, key, etag, snapshot) {
+  if (!cache) return;
+  try {
+    if (!etag) {
+      cache.remove(key);
+      return;
+    }
+    // Só a projeção fica no cache; fotos e demais tabelas não são usadas pela planilha.
+    const source = JSON.stringify({
+      etag: etag,
+      snapshot: snapshot,
+      signature: assinaturaDados_('FIREBASE_PROJECTION_1', snapshot),
+    });
+    const encoded = Utilities.base64Encode(Utilities.gzip(Utilities.newBlob(source, 'application/json')).getBytes());
+    if (Utilities.newBlob(encoded).getBytes().length > 95000) {
+      cache.remove(key);
+      return;
+    }
+    cache.put(key, encoded, 21600);
+  } catch (error) {
+    // Limite/expiração do cache apenas fará a próxima leitura baixar o snapshot completo.
+  }
 }
 
 const NOMES_MESES_ = Object.freeze([
