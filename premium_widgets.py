@@ -179,7 +179,10 @@ class SmoothScrollableFrame(ctk.CTkScrollableFrame):
                 self._parent_canvas.xview_moveto(fraction)
             else:
                 self._parent_canvas.yview_moveto(fraction)
-            if abs(distance) >= 0.75:
+            actual, _maximum, _extent = self._scroll_metrics(self._scroll_axis)
+            # Tk rounds canvas positions to whole pixels. Stop if rounding or
+            # a viewport boundary prevents progress, rather than looping forever.
+            if abs(distance) >= 0.75 and abs(actual-current) >= 0.5:
                 self._smooth_scroll_job = self.after(12, self._animate_scroll)
             else:
                 self._scroll_target_pixels = None

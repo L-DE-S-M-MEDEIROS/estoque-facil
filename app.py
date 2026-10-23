@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import calendar
 import ctypes
+import gc
+import logging
+from logging.handlers import RotatingFileHandler
 import math
 import os
 import queue
@@ -36,7 +39,7 @@ from sales_list_import import SalesListError, normalize_sku_key, read_sales_list
 from updater import UpdateError, check_for_update, download_update, run_update_helper, schedule_update_cleanup, start_update_install
 
 APP_NAME = "ESTOQUE BOLSAS BABY"
-APP_VERSION = "1.2.20"
+APP_VERSION = "1.2.21"
 GITHUB_REPO = "L-DE-S-M-MEDEIROS/estoque-facil"
 GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1eXMlyvFpO_-MkD8oaux1NrlupqR-ECNyEZS1XSgJIiY/edit?usp=sharing"
 SEARCH_RESULT_LIMIT = 18
@@ -4240,19 +4243,22 @@ class EstoqueApp(ctk.CTk):
         if prefer_local is None:prefer_local=has_pending_sync(self.db.db)
         self.cloud_sync_busy=True;self.cloud_sync_pending=False;self.cloud_sync_error=""
         self.update_cloud_status()
+        cloud,db_path,events=self.cloud,self.db.path,self.cloud_events
         def worker():
             connection=None
             try:
-                connection=sqlite3.connect(self.db.path,timeout=5)
+                connection=sqlite3.connect(db_path,timeout=5)
                 configure_database_connection(connection)
                 if operation=="upload":
-                    result={"action":"uploaded","snapshot":self.cloud.upload(connection)}
+                    result={"action":"uploaded","snapshot":cloud.upload(connection)}
                 elif operation=="download":
-                    result={"action":"downloaded","updated_at":self.cloud.download(connection)}
-                else:result=self.cloud.synchronize(connection,prefer_local)
-                self.cloud_events.put(("success",result,silent))
-            except CloudSyncError as error:self.cloud_events.put(("error",str(error),silent))
-            except Exception as error:self.cloud_events.put(("error",f"Não foi possível sincronizar: {error}",silent))
+                    result={"action":"downloaded","updated_at":cloud.download(connection)}
+                else:result=cloud.synchronize(connection,prefer_local)
+                events.put(("success",result,silent))
+            except CloudSyncError as error:events.put(("error",str(error),silent))
+            except Exception as error:
+                logging.exception("Falha na sincronização")
+                events.put(("error",f"Não foi possível sincronizar: {error}",silent))
             finally:
                 if connection is not None:connection.close()
         threading.Thread(target=worker,daemon=True).start();self.after(120,self.poll_cloud_sync_events)
@@ -4310,10 +4316,11 @@ class EstoqueApp(ctk.CTk):
             return
         self.update_busy=True;self.set_update_status("Consultando a publicação oficial no GitHub...")
         if self.update_button is not None:self.update_button.configure(state="disabled",text="Verificando...")
+        events=self.update_events
         def worker():
-            try:self.update_events.put(("checked",check_for_update(APP_VERSION,GITHUB_REPO),silent))
-            except UpdateError as error:self.update_events.put(("check_error",str(error),silent))
-            except Exception:self.update_events.put(("check_error","Falha inesperada ao buscar atualização.",silent))
+            try:events.put(("checked",check_for_update(APP_VERSION,GITHUB_REPO),silent))
+            except UpdateError as error:events.put(("check_error",str(error),silent))
+            except Exception:events.put(("check_error","Falha inesperada ao buscar atualização.",silent))
         threading.Thread(target=worker,daemon=True).start();self.after(100,self.poll_update_events)
     def poll_update_events(self):
         try:event=self.update_events.get_nowait()
@@ -4342,11 +4349,12 @@ class EstoqueApp(ctk.CTk):
     def download_available_update(self,info):
         self.update_busy=True;self.set_update_status("Preparando download seguro...")
         if self.update_button is not None:self.update_button.configure(state="disabled",text="Baixando 0%")
-        def progress(downloaded,total):self.update_events.put(("progress",downloaded,total))
+        events=self.update_events
+        def progress(downloaded,total):events.put(("progress",downloaded,total))
         def worker():
-            try:self.update_events.put(("downloaded",download_update(info,progress),info))
-            except UpdateError as error:self.update_events.put(("download_error",str(error)))
-            except Exception:self.update_events.put(("download_error","Não foi possível concluir o download."))
+            try:events.put(("downloaded",download_update(info,progress),info))
+            except UpdateError as error:events.put(("download_error",str(error)))
+            except Exception:events.put(("download_error","Não foi possível concluir o download."))
         threading.Thread(target=worker,daemon=True).start()
     def install_downloaded_update(self,path,info):
         self.set_update_status("Download validado. Substituindo a versão anterior e reiniciando...")
@@ -4381,8 +4389,31 @@ class EstoqueApp(ctk.CTk):
             self.db.db.close(); self.destroy()
 
 
+def run_desktop_app():
+    """Keep Tcl object finalizers on the GUI thread, including cyclic garbage.
+
+    Automatic cyclic collection can otherwise run in a network worker and
+    finalize a widget cycle there, deadlocking or aborting Tcl on Windows.
+    """
+    automatic_gc=gc.isenabled()
+    gc.disable()
+    gui=None
+    try:
+        gui=EstoqueApp()
+        def collect_gui_cycles():
+            gc.collect()
+            gui.after(15000,collect_gui_cycles)
+        gui.after(15000,collect_gui_cycles)
+        gui.mainloop()
+    finally:
+        gc.collect()
+        if automatic_gc:gc.enable()
+
+
 if __name__=="__main__":
     try:
         if run_update_helper(sys.argv):raise SystemExit(0)
-        schedule_update_cleanup(sys.argv);enable_dpi_awareness();EstoqueApp().mainloop()
+        log_handler=RotatingFileHandler(data_dir()/"diagnostico.log",maxBytes=1_000_000,backupCount=2,encoding="utf-8")
+        logging.basicConfig(level=logging.ERROR,handlers=[log_handler],format="%(asctime)s %(threadName)s %(message)s")
+        schedule_update_cleanup(sys.argv);enable_dpi_awareness();run_desktop_app()
     except Exception as error:(data_dir()/"erro.log").write_text(f"{datetime.now().isoformat()}\n{error!r}\n",encoding="utf-8");raise
